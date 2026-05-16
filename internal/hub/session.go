@@ -101,7 +101,15 @@ func (s *Session) handleHello(env *rrc.Envelope) {
 
 	// Greeting (message-of-the-day) is delivered after WELCOME as one or
 	// more hub-wide NOTICE messages, chunked to stay within the link MTU.
-	for _, chunk := range chunkGreeting(h.cfg.Greeting) {
+	for _, chunk := range chunkText(h.cfg.Greeting) {
+		s.send(rrc.Notice(h.identityHash, h.now(), nil, chunk))
+	}
+
+	// Advertise the rooms that already exist on the hub. RRC has no
+	// room-list message, so without this a fresh client cannot discover
+	// a room name to JOIN — it would only ever see rooms it was told
+	// about out-of-band.
+	for _, chunk := range chunkText(h.roomDirectory()) {
 		s.send(rrc.Notice(h.identityHash, h.now(), nil, chunk))
 	}
 }
