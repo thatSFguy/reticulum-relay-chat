@@ -795,8 +795,14 @@ func (t *Transport) handleLinkData(p *Packet) {
 		return
 	}
 	switch p.Context {
-	case ContextNone:
-		// Fall through to the original direct-LXMF handler below.
+	case ContextNone, ContextLinkIdentify:
+		// ContextNone: application link DATA. ContextLinkIdentify:
+		// the §6.6 LINKIDENTIFY frame — both are link-encrypted the
+		// same way and are delivered to the link's inbound-data
+		// callback. fwdsvc only ever SENDS LINKIDENTIFY (as a link
+		// initiator); a responder such as an RRC hub must RECEIVE it
+		// to bind the peer's verified identity, so it falls through
+		// to the decrypt + callback path here too.
 	case ContextResourceADV, ContextResourceREQ, ContextResourceHMU,
 		ContextResourceICL, ContextResourceRCL:
 		// Resource control packets — bodies are link-encrypted (SPEC

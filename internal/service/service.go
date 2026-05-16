@@ -26,9 +26,11 @@ import (
 // name_hash = SHA-256("rrc.hub")[:10] = ac9fd3a81e4036f86e1d.
 const hubAspect = "rrc.hub"
 
-// identifyFrameLen is the plaintext length of a §6.6 LINKIDENTIFY frame:
-// identity_hash(16) || ed25519_signature(64).
-const identifyFrameLen = 16 + ed25519.SignatureSize
+// identifyFrameLen is the decrypted length of a §6.6 LINKIDENTIFY
+// frame: link_id(16) || identity.public_key(64) || ed25519_signature(64).
+// The signature covers link_id || public_key, so the frame is
+// self-contained — no prior announce is needed to verify it.
+const identifyFrameLen = 16 + 64 + ed25519.SignatureSize
 
 // Service is the running RRC hub daemon.
 type Service struct {
@@ -77,6 +79,11 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 		DestHash:      svc.destHash,
 		Identity:      id,
 		BuildAnnounce: svc.buildAnnounce,
+		// RRC carries no opportunistic DATA (spec §17.5) — all traffic
+		// rides Links. A non-link DATA packet to the hub destination is
+		// unexpected; log and drop it. OnPacket is required by
+		// RegisterLocal even when, as here, it is effectively a no-op.
+		OnPacket: svc.onPacket,
 		// OnLinkPlaintext is left nil so inbound link DATA falls through
 		// to the LinkManager's default handler, which also hands us the
 		// link_id — we need it to route DATA to the right session.
@@ -152,6 +159,12 @@ func (s *Service) announceLoop(ctx context.Context) {
 	}
 }
 
+// onPacket handles inbound non-link DATA addressed to the hub. RRC uses
+// no opportunistic packets, so anything arriving here is unexpected.
+func (s *Service) onPacket(p *rns.Packet) {
+	s.log.Printf("rrc: ignoring unexpected non-link DATA packet (context=0x%02x)", p.Context)
+}
+
 // --- inbound link DATA routing ---------------------------------------
 
 // onLinkData is the LinkManager default handler: it receives every
@@ -184,46 +197,34 @@ func (s *Service) sessionFor(linkID []byte) *hub.Session {
 	return sess
 }
 
-// handleIdentify parses a LINKIDENTIFY frame, verifies the Ed25519
-// signature against a cached announce when one is available, and binds
-// the (verified) identity hash to the link.
+// handleIdentify parses a §6.6 LINKIDENTIFY frame —
+// link_id(16) || public_key(64) || signature(64) — verifies the
+// Ed25519 signature over link_id || public_key, and binds the verified
+// identity hash (SHA-256(public_key)[:16]) to the link. The frame is
+// self-contained, so verification never depends on a prior announce.
 func (s *Service) handleIdentify(linkID, plaintext []byte) {
-	idHash := plaintext[:16]
-	sig := plaintext[16:]
-	verified := s.verifyIdentify(linkID, idHash, sig)
+	embeddedLinkID := plaintext[0:16]
+	pubKey := plaintext[16:80]
+	sig := plaintext[80:144]
 
-	key := hex.EncodeToString(linkID)
+	if !equalBytes(embeddedLinkID, linkID) {
+		s.log.Printf("link %x: LINKIDENTIFY link_id mismatch — dropped", linkID[:4])
+		return
+	}
+	signed := make([]byte, 0, 16+64)
+	signed = append(signed, linkID...)
+	signed = append(signed, pubKey...)
+	if !ed25519.Verify(ed25519.PublicKey(pubKey[32:]), signed, sig) {
+		s.log.Printf("link %x: LINKIDENTIFY signature invalid — dropped", linkID[:4])
+		return
+	}
+
+	h := sha256.Sum256(pubKey)
+	idHash := append([]byte(nil), h[:16]...)
 	s.mu.Lock()
-	s.identities[key] = append([]byte(nil), idHash...)
+	s.identities[hex.EncodeToString(linkID)] = idHash
 	s.mu.Unlock()
-
-	state := "verified"
-	if !verified {
-		state = "UNVERIFIED (no cached announce for this identity)"
-	}
-	s.log.Printf("link %x identified as %s — %s", linkID[:4], hex.EncodeToString(idHash), state)
-}
-
-// verifyIdentify checks the LINKIDENTIFY signature — sig covers
-// link_id(16) || identity.public_key(64) — against a public key
-// recovered from the announce table. Returns false when no announce for
-// the claimed identity has been seen (the claim is still recorded, but
-// flagged).
-func (s *Service) verifyIdentify(linkID, idHash, sig []byte) bool {
-	for _, k := range s.transport.KnownSnapshot() {
-		if len(k.PublicKey) != 64 {
-			continue
-		}
-		h := sha256.Sum256(k.PublicKey)
-		if !equalBytes(h[:16], idHash) {
-			continue
-		}
-		signed := make([]byte, 0, len(linkID)+64)
-		signed = append(signed, linkID...)
-		signed = append(signed, k.PublicKey...)
-		return ed25519.Verify(ed25519.PublicKey(k.PublicKey[32:]), signed, sig)
-	}
-	return false
+	s.log.Printf("link %x identified as %s (verified)", linkID[:4], hex.EncodeToString(idHash))
 }
 
 func (s *Service) peerIdentity(linkID []byte) []byte {

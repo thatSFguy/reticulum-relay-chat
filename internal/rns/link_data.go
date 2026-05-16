@@ -56,8 +56,12 @@ func ParseLinkDataPacket(p *Packet, signing, encryption []byte) ([]byte, error) 
 	if p.DestinationType != DestinationLink {
 		return nil, fmt.Errorf("dest_type %d is not LINK", p.DestinationType)
 	}
-	if p.Context != ContextNone {
-		return nil, fmt.Errorf("link DATA context = 0x%02x, want 0x00", p.Context)
+	// ContextNone is application link DATA; ContextLinkIdentify is the
+	// §6.6 LINKIDENTIFY frame. Both are link-encrypted DATA payloads
+	// decrypted identically — a responder (e.g. an RRC hub) must accept
+	// the latter to read the peer's identity claim.
+	if p.Context != ContextNone && p.Context != ContextLinkIdentify {
+		return nil, fmt.Errorf("link DATA context = 0x%02x, want 0x00 or 0xfb", p.Context)
 	}
 	return LinkTokenDecrypt(p.Data, signing, encryption)
 }
