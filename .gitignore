@@ -1,0 +1,23 @@
+/rrc-hub
+/rrc-hub.exe
+/rrc-hub-*
+/build/
+/dist/
+*.test
+*.out
+.idea/
+.vscode/
+
+# Local hub state — never commit the long-term identity or a live config.
+hub_identity
+/rrc-hub.toml
+*.log
+
+# Agent / AI config files — local to the developer, not pushed.
+AGENTS.md
+AGENT.md
+agents.md
+agent.md
+.claude/
+.cursor/
+CLAUDE.md
