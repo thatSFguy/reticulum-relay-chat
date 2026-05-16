@@ -1,0 +1,37 @@
+# Example configuration for the Reticulum Relay Chat hub (rrc-hub).
+# Copy to rrc-hub.toml and edit, then run:  rrc-hub -config rrc-hub.toml
+
+[hub]
+# Display name shown to clients in the WELCOME message.
+name = "RRC Hub"
+
+# Software version string advertised in WELCOME.
+version = "rrc-hub-go/0.1.0"
+
+# Optional message-of-the-day, delivered as NOTICE messages right after
+# WELCOME (chunked to fit the link MTU). Leave empty to disable.
+greeting = "Welcome to the hub. Use /join <room> in your client to start chatting."
+
+# Where the hub's long-term Reticulum identity is stored. Created on
+# first run if it does not exist. The destination hash clients add is
+# derived from this identity + the rrc.hub aspect.
+identity_path = "hub_identity"
+
+# How often the hub re-announces its rrc.hub destination so relays keep
+# a fresh path and clients can discover it.
+announce_interval = "5m"
+
+[hub.limits]
+# Limits advertised to clients in WELCOME and enforced hub-side.
+max_nick_bytes = 32
+max_room_name_bytes = 64
+max_msg_body_bytes = 4096
+max_rooms_per_session = 16
+rate_limit_msgs_per_minute = 30
+
+# One or more Reticulum transport attachments. Only tcp_client is
+# supported — attach to any rnsd TCPServerInterface. Use a public
+# transport node so clients on the wider mesh can reach the hub.
+[[interfaces]]
+type = "tcp_client"
+address = "RNS.MichMesh.net:7822"
