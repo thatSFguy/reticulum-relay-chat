@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"testing"
 
@@ -133,6 +134,38 @@ func TestJoinRequiresHello(t *testing.T) {
 	}
 	if got.Type != rrc.TError {
 		t.Errorf("expected ERROR, got type %d", got.Type)
+	}
+}
+
+// TestGreetingAdvertisesRooms checks that a client's HELLO is answered
+// with a NOTICE listing the hub's existing rooms — RRC has no room-list
+// message, so this advert is how a fresh client discovers room names.
+func TestGreetingAdvertisesRooms(t *testing.T) {
+	h := quietHub()
+
+	// First client creates a room.
+	linkA := &fakeLink{id: bytes.Repeat([]byte{0xA1}, 16)}
+	sa := h.NewSession(linkA)
+	sa.OnInbound(encode(t, clientEnvelope(rrc.THello, linkA.id, "", nil)))
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TJoin, linkA.id, "alpha", nil)))
+
+	// A second client connecting fresh must be told #alpha exists.
+	linkB := &fakeLink{id: bytes.Repeat([]byte{0xB2}, 16)}
+	sb := h.NewSession(linkB)
+	sb.OnInbound(encode(t, clientEnvelope(rrc.THello, linkB.id, "", nil)))
+
+	advertised := false
+	for _, f := range linkB.frames() {
+		env, err := rrc.Decode(f)
+		if err != nil {
+			continue
+		}
+		if env.Type == rrc.TNotice && strings.Contains(rrc.BodyText(env), "#alpha") {
+			advertised = true
+		}
+	}
+	if !advertised {
+		t.Error("second client's HELLO got no room-directory NOTICE listing #alpha")
 	}
 }
 

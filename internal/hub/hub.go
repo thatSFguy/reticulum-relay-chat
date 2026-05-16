@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -84,6 +85,29 @@ func (h *Hub) RoomCount() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.rooms)
+}
+
+// roomDirectory renders the hub's current rooms as a human-readable
+// line — "Active rooms: #lobby, #checkers" — or "" when the hub has no
+// rooms. RRC has no room-list protocol message, so the hub advertises
+// its rooms to each new client in a NOTICE after WELCOME; that is the
+// only way a client can discover a room name without being told it
+// out-of-band.
+func (h *Hub) roomDirectory() string {
+	h.mu.Lock()
+	names := make([]string, 0, len(h.rooms))
+	for name := range h.rooms {
+		names = append(names, name)
+	}
+	h.mu.Unlock()
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	for i, n := range names {
+		names[i] = "#" + n
+	}
+	return "Active rooms: " + strings.Join(names, ", ")
 }
 
 // roomLocked returns the room, creating it on first reference. Caller

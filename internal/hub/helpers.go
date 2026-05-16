@@ -61,10 +61,11 @@ func shortHash(h []byte) string {
 	return hex.EncodeToString(h[:n])
 }
 
-// chunkGreeting splits a message-of-the-day into rune-safe chunks small
-// enough to fit a single NOTICE envelope under the default link MTU.
-func chunkGreeting(greeting string) []string {
-	if greeting == "" {
+// chunkText splits a string into rune-safe chunks small enough to fit a
+// single NOTICE envelope under the default link MTU — used for both the
+// greeting and the room-directory advert.
+func chunkText(text string) []string {
+	if text == "" {
 		return nil
 	}
 	const maxChunkBytes = 300
@@ -72,7 +73,7 @@ func chunkGreeting(greeting string) []string {
 		chunks []string
 		cur    strings.Builder
 	)
-	for _, ch := range greeting {
+	for _, ch := range text {
 		if cur.Len()+utf8.RuneLen(ch) > maxChunkBytes && cur.Len() > 0 {
 			chunks = append(chunks, cur.String())
 			cur.Reset()
