@@ -39,6 +39,12 @@ type Link interface {
 // resourceExpectFloor is the resource-expectation reaper interval.
 const resourceExpectFloor = 30 * time.Second
 
+// unwelcomedIdleTimeout bounds how long a session may stay un-welcomed
+// (an RRC frame arrived but no successful HELLO) before the hub closes
+// it, so a peer cannot hold session slots without authenticating
+// (audit A3).
+const unwelcomedIdleTimeout = 60 * time.Second
+
 // Hub holds the live room registry and connected sessions. All exported
 // methods are safe for concurrent use.
 type Hub struct {
@@ -394,7 +400,31 @@ func (h *Hub) reaperLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			h.reapExpectations()
+			h.doIdleSweep()
 		}
+	}
+}
+
+// doIdleSweep closes sessions that have stayed un-welcomed past
+// unwelcomedIdleTimeout — a peer that opened a session but never
+// completed HELLO. Without this an attacker could hold session slots
+// (audit A3) up to the MaxSessions cap without ever authenticating.
+func (h *Hub) doIdleSweep() {
+	cutoff := h.now() - unwelcomedIdleTimeout.Milliseconds()
+	h.mu.Lock()
+	var idle []*Session
+	for s := range h.sessions {
+		s.mu.Lock()
+		stale := !s.welcomed && s.createdMs != 0 && s.createdMs < cutoff
+		s.mu.Unlock()
+		if stale {
+			idle = append(idle, s)
+		}
+	}
+	h.mu.Unlock()
+	for _, s := range idle {
+		h.log.Printf("hub: closing idle un-welcomed session %s", shortHash(s.identity()))
+		s.Close()
 	}
 }
 

@@ -436,6 +436,22 @@ func (s *Session) cmdRegister(parts []string, room string) {
 		s.sendNotice(roomPtr(room), "cannot register room: no room_registry_path")
 		return
 	}
+	// Cap registered rooms per founding identity (audit A3): one peer
+	// must not be able to fill rooms.toml with unlimited registrations.
+	if h.cfg.MaxRegisteredRoomsPerIdentity > 0 && !r.registered {
+		idHex := s.identityHex()
+		count := 0
+		for _, rr := range h.rooms {
+			if rr.registered && rr.founder == idHex {
+				count++
+			}
+		}
+		if count >= h.cfg.MaxRegisteredRoomsPerIdentity {
+			h.mu.Unlock()
+			s.sendError(roomPtr(target), "registered-room limit reached for your identity")
+			return
+		}
+	}
 	r.registered = true
 	r.noOutsideMsgs = true
 	r.topicOpsOnly = true
@@ -598,6 +614,11 @@ func (s *Session) cmdOpVoice(cmd string, parts []string, room string) {
 	var reply string
 	switch cmd {
 	case "op":
+		if !aclHasRoom(r.ops, hh, h.cfg.MaxRoomAclEntries) {
+			h.mu.Unlock()
+			s.sendNotice(roomPtr(room), "operator list for "+target+" is full")
+			return
+		}
 		r.ops[hh] = struct{}{}
 		reply = "op granted in " + target
 	case "deop":
@@ -609,6 +630,11 @@ func (s *Session) cmdOpVoice(cmd string, parts []string, room string) {
 		delete(r.ops, hh)
 		reply = "op removed in " + target
 	case "voice":
+		if !aclHasRoom(r.voiced, hh, h.cfg.MaxRoomAclEntries) {
+			h.mu.Unlock()
+			s.sendNotice(roomPtr(room), "voice list for "+target+" is full")
+			return
+		}
 		r.voiced[hh] = struct{}{}
 		reply = "voice granted in " + target
 	case "devoice":
@@ -751,12 +777,22 @@ func (s *Session) cmdMode(parts []string, room string) {
 				return
 			}
 			if set {
+				if !aclHasRoom(r.ops, hh, h.cfg.MaxRoomAclEntries) {
+					h.mu.Unlock()
+					s.sendNotice(roomPtr(room), "operator list for "+target+" is full")
+					return
+				}
 				r.ops[hh] = struct{}{}
 			} else {
 				delete(r.ops, hh)
 			}
 		case 'v':
 			if set {
+				if !aclHasRoom(r.voiced, hh, h.cfg.MaxRoomAclEntries) {
+					h.mu.Unlock()
+					s.sendNotice(roomPtr(room), "voice list for "+target+" is full")
+					return
+				}
 				r.voiced[hh] = struct{}{}
 			} else {
 				delete(r.voiced, hh)
@@ -859,6 +895,11 @@ func (s *Session) cmdBan(parts []string, room string) {
 	}
 
 	if op == "add" {
+		if !aclHasRoom(r.bans, hh, h.cfg.MaxRoomAclEntries) {
+			h.mu.Unlock()
+			s.sendNotice(roomPtr(room), "ban list for "+target+" is full")
+			return
+		}
 		r.bans[hh] = struct{}{}
 		h.touchRoom(r)
 		if r.registered {
