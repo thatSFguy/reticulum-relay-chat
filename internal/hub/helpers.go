@@ -2,11 +2,14 @@ package hub
 
 import (
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
+
+// maxNoticeChunkChars is the line-based NOTICE chunk size (rrcd's
+// MAX_NOTICE_CHUNK_CHARS).
+const maxNoticeChunkChars = 512
 
 // roomLinksLocked collects the links of every member of a room. The
 // caller must hold the hub mutex.
@@ -18,35 +21,16 @@ func roomLinksLocked(r *Room) []Link {
 	return out
 }
 
-// fanout encodes env once and delivers it to every recipient link.
-// Per-link send failures are logged but never abort the fan-out — a
-// dead link is reclaimed when its own read loop ends.
-func (h *Hub) fanout(recipients []Link, env *rrc.Envelope) {
-	if len(recipients) == 0 {
-		return
-	}
-	frame, err := env.Encode()
-	if err != nil {
-		h.log.Printf("rrc: fan-out encode failed (type %d): %v", env.Type, err)
-		return
-	}
-	for _, l := range recipients {
-		if e := l.Send(frame); e != nil {
-			h.log.Printf("rrc: fan-out send failed: %v", e)
+// roomLinksExceptLocked collects member links excluding one session.
+func roomLinksExceptLocked(r *Room, except *Session) []Link {
+	out := make([]Link, 0, len(r.members))
+	for s := range r.members {
+		if s == except {
+			continue
 		}
+		out = append(out, s.link)
 	}
-}
-
-// clampNick truncates a nick to maxBytes, never splitting a UTF-8 rune.
-func clampNick(nick string, maxBytes int) string {
-	if maxBytes <= 0 || len(nick) <= maxBytes {
-		return nick
-	}
-	b := []byte(nick)[:maxBytes]
-	for len(b) > 0 && !utf8.Valid(b) {
-		b = b[:len(b)-1]
-	}
-	return string(b)
+	return out
 }
 
 // shortHash renders the first 4 bytes of an identity hash for logs.
@@ -61,27 +45,187 @@ func shortHash(h []byte) string {
 	return hex.EncodeToString(h[:n])
 }
 
-// chunkText splits a string into rune-safe chunks small enough to fit a
-// single NOTICE envelope under the default link MTU — used for both the
-// greeting and the room-directory advert.
+// shortHex12 renders the first 12 hex chars of an identity hash.
+func shortHex12(h []byte) string {
+	s := hex.EncodeToString(h)
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
+// normHex lowercases a hex hash and strips an optional "0x" prefix and
+// surrounding whitespace.
+func normHex(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	s = strings.TrimPrefix(s, "0x")
+	return s
+}
+
+// parseHexHash parses a token as an identity hash: optional "0x" prefix,
+// whitespace tolerated, must be valid lowercase hex of at least 4 bytes.
+func parseHexHash(tok string) (string, error) {
+	n := normHex(tok)
+	b, err := hex.DecodeString(n)
+	if err != nil {
+		return "", fmt.Errorf("not valid hex")
+	}
+	if len(b) < 4 {
+		return "", fmt.Errorf("identity hash too short (need >= 4 bytes)")
+	}
+	return n, nil
+}
+
+// looksLikeHashPrefix reports whether a token should be treated as an
+// identity-hash prefix rather than a nick: all-hex (after 0x strip) and
+// at least 6 chars long.
+func looksLikeHashPrefix(tok string) bool {
+	n := normHex(tok)
+	if len(n) < 6 {
+		return false
+	}
+	for _, c := range n {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeNick validates and trims a nick. Returns ("", false) when the
+// nick is invalid (control chars, invalid UTF-8, or too long) so the
+// caller drops it.
+func normalizeNick(nick string, maxBytes int) (string, bool) {
+	nick = strings.TrimSpace(nick)
+	if nick == "" {
+		return "", false
+	}
+	if !utf8.ValidString(nick) {
+		return "", false
+	}
+	if strings.ContainsAny(nick, "\n\r\x00") {
+		return "", false
+	}
+	if maxBytes > 0 && len(nick) > maxBytes {
+		return "", false
+	}
+	return nick, true
+}
+
+// chunkText splits text into rune-safe NOTICE chunks of at most
+// maxNoticeChunkChars characters, preferring line boundaries.
 func chunkText(text string) []string {
 	if text == "" {
 		return nil
 	}
-	const maxChunkBytes = 300
-	var (
-		chunks []string
-		cur    strings.Builder
-	)
-	for _, ch := range text {
-		if cur.Len()+utf8.RuneLen(ch) > maxChunkBytes && cur.Len() > 0 {
-			chunks = append(chunks, cur.String())
-			cur.Reset()
+	var chunks []string
+	for _, line := range strings.Split(text, "\n") {
+		if utf8.RuneCountInString(line) <= maxNoticeChunkChars {
+			chunks = append(chunks, line)
+			continue
 		}
-		cur.WriteRune(ch)
-	}
-	if cur.Len() > 0 {
-		chunks = append(chunks, cur.String())
+		var cur strings.Builder
+		count := 0
+		for _, ch := range line {
+			if count >= maxNoticeChunkChars {
+				chunks = append(chunks, cur.String())
+				cur.Reset()
+				count = 0
+			}
+			cur.WriteRune(ch)
+			count++
+		}
+		if cur.Len() > 0 {
+			chunks = append(chunks, cur.String())
+		}
 	}
 	return chunks
+}
+
+// targetMatch is one resolved peer for a /command target token.
+type targetMatch struct {
+	session *Session
+	hashHex string
+	nick    string
+}
+
+// resolveTarget resolves a command-argument token to connected peers. If
+// the token looks like a hash prefix (>= 6 hex chars) it matches peers by
+// hex-prefix; otherwise it matches by nick (case-insensitive). When room
+// is non-nil, matches are filtered to that room. Caller must hold h.mu.
+func (h *Hub) resolveTargetLocked(tok string, room *Room) []targetMatch {
+	var pool []*Session
+	if room != nil {
+		for s := range room.members {
+			pool = append(pool, s)
+		}
+	} else {
+		for s := range h.sessions {
+			pool = append(pool, s)
+		}
+	}
+
+	var matches []targetMatch
+	if looksLikeHashPrefix(tok) {
+		prefix := normHex(tok)
+		for _, s := range pool {
+			id := s.identity()
+			if id == nil {
+				continue
+			}
+			hh := hex.EncodeToString(id)
+			if strings.HasPrefix(hh, prefix) {
+				s.mu.Lock()
+				nick := s.nick
+				s.mu.Unlock()
+				matches = append(matches, targetMatch{s, hh, nick})
+			}
+		}
+		return matches
+	}
+	want := strings.ToLower(strings.TrimSpace(tok))
+	for _, s := range pool {
+		s.mu.Lock()
+		nick := s.nick
+		s.mu.Unlock()
+		if nick != "" && strings.ToLower(nick) == want {
+			hh := ""
+			if id := s.identity(); id != nil {
+				hh = hex.EncodeToString(id)
+			}
+			matches = append(matches, targetMatch{s, hh, nick})
+		}
+	}
+	return matches
+}
+
+// ambiguityNotice renders the multi-match disambiguation text.
+func ambiguityNotice(matches []targetMatch) string {
+	var b strings.Builder
+	b.WriteString("ambiguous target — multiple matches:")
+	for _, m := range matches {
+		b.WriteString(fmt.Sprintf("\n  - %s nick='%s'", m.hashHex, m.nick))
+	}
+	b.WriteString("\nUse full or longer identity hash to disambiguate.")
+	return b.String()
+}
+
+// renderMember renders a member for /who output.
+func renderMember(s *Session) string {
+	id := s.identity()
+	s.mu.Lock()
+	nick := s.nick
+	s.mu.Unlock()
+	if id == nil {
+		return "(unidentified)"
+	}
+	full := hex.EncodeToString(id)
+	if nick != "" {
+		short := full
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		return fmt.Sprintf("%s (%s)", nick, short)
+	}
+	return full
 }

@@ -43,8 +43,9 @@ func limitsToMap(l Limits) map[int]any {
 	}
 }
 
-// Joined announces the post-change member set of a room. members is a
-// list of 16-byte RNS identity hashes.
+// Joined announces a join. members is the post-change member set (16-byte
+// RNS identity hashes); pass nil to omit the member list entirely — the
+// hub does so when include_joined_member_list is off.
 func Joined(hubSrc []byte, tsMs int64, room string, members [][]byte) *Envelope {
 	e := newEnvelope(TJoined, hubSrc, tsMs)
 	e.Room = strptr(room)
@@ -52,7 +53,7 @@ func Joined(hubSrc []byte, tsMs int64, room string, members [][]byte) *Envelope 
 	return e
 }
 
-// Parted announces the post-change member set after a PART.
+// Parted announces a departure. members behaves as in Joined.
 func Parted(hubSrc []byte, tsMs int64, room string, members [][]byte) *Envelope {
 	e := newEnvelope(TParted, hubSrc, tsMs)
 	e.Room = strptr(room)
@@ -60,12 +61,39 @@ func Parted(hubSrc []byte, tsMs int64, room string, members [][]byte) *Envelope 
 	return e
 }
 
-func membersToList(members [][]byte) []any {
+// membersToList renders the member list, or nil (key omitted) when
+// members is nil.
+func membersToList(members [][]byte) any {
+	if members == nil {
+		return nil
+	}
 	out := make([]any, len(members))
 	for i, m := range members {
 		out[i] = m
 	}
 	return out
+}
+
+// ResourceEnvelope announces an RNS Resource transfer carrying a payload
+// too large for a single packet (rrcd resources.py). rid is 8 random
+// bytes; kind is one of the ResKind* constants; sha256 may be nil;
+// encoding may be "".
+func ResourceEnvelope(src []byte, tsMs int64, room *string, rid []byte, kind string, size int, sha256 []byte, encoding string) *Envelope {
+	e := newEnvelope(TResourceEnvelope, src, tsMs)
+	e.Room = room
+	body := map[int]any{
+		BResID:   rid,
+		BResKind: kind,
+		BResSize: size,
+	}
+	if sha256 != nil {
+		body[BResSHA256] = sha256
+	}
+	if encoding != "" {
+		body[BResEncoding] = encoding
+	}
+	e.Body = body
+	return e
 }
 
 // Notice is an informational, non-error message — room may be nil for a
@@ -153,4 +181,65 @@ func NickName(e *Envelope) string {
 		return ""
 	}
 	return *e.Nick
+}
+
+// LegacyHelloNick returns the nickname a pre-0.1.1 client carried in the
+// HELLO body (key BHelloNickLegacy), or "" when absent.
+func LegacyHelloNick(e *Envelope) string {
+	body, _ := e.Body.(map[any]any)
+	if body == nil {
+		return ""
+	}
+	s, _ := valueOf(body, BHelloNickLegacy).(string)
+	return s
+}
+
+// ResourceInfo is the parsed body of a RESOURCE_ENVELOPE message.
+type ResourceInfo struct {
+	ID       []byte // resource id
+	Kind     string // ResKind*
+	Size     int    // declared payload size in bytes
+	SHA256   []byte // payload digest, nil when the client omitted it
+	Encoding string // encoding hint, "" when absent
+}
+
+// ResourceEnvelopeInfo extracts a RESOURCE_ENVELOPE body. ok is false
+// when the body is absent, not a CBOR map, or omits/mistypes a required
+// field (id, kind, size) — the caller answers such a frame with ERROR.
+func ResourceEnvelopeInfo(e *Envelope) (ResourceInfo, bool) {
+	body, _ := e.Body.(map[any]any)
+	if body == nil {
+		return ResourceInfo{}, false
+	}
+	var r ResourceInfo
+	id, ok := valueOf(body, BResID).([]byte)
+	if !ok {
+		return ResourceInfo{}, false
+	}
+	r.ID = id
+	kind, ok := valueOf(body, BResKind).(string)
+	if !ok {
+		return ResourceInfo{}, false
+	}
+	r.Kind = kind
+	switch s := valueOf(body, BResSize).(type) {
+	case uint64:
+		r.Size = int(s)
+	case int64:
+		r.Size = int(s)
+	case int:
+		r.Size = s
+	default:
+		return ResourceInfo{}, false
+	}
+	if r.Size < 0 {
+		return ResourceInfo{}, false
+	}
+	if sha, ok := valueOf(body, BResSHA256).([]byte); ok {
+		r.SHA256 = sha
+	}
+	if enc, ok := valueOf(body, BResEncoding).(string); ok {
+		r.Encoding = enc
+	}
+	return r, true
 }
