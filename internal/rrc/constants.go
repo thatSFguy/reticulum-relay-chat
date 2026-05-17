@@ -34,6 +34,7 @@ const (
 	TParted           = 13
 	TMsg              = 20
 	TNotice           = 21
+	TAction           = 22 // §0.1.3 — routed identically to MSG/NOTICE
 	TPing             = 30
 	TPong             = 31
 	TError            = 40
@@ -42,9 +43,27 @@ const (
 
 // HELLO body keys.
 const (
-	BHelloName = 0
-	BHelloVer  = 1
-	BHelloCaps = 2
+	BHelloName       = 0
+	BHelloVer        = 1
+	BHelloCaps       = 2
+	BHelloNickLegacy = 64 // pre-0.1.1 clients carried the nick here
+)
+
+// RESOURCE_ENVELOPE body keys — the CBOR map describing an inbound RNS
+// Resource transfer (rrcd resources.py).
+const (
+	BResID       = 0 // resource id (8 random bytes)
+	BResKind     = 1 // resource kind (string, see ResKind*)
+	BResSize     = 2 // declared payload size in bytes (uint)
+	BResSHA256   = 3 // payload SHA-256 (32 bytes, optional)
+	BResEncoding = 4 // payload encoding hint (string, optional)
+)
+
+// Resource kinds carried in a RESOURCE_ENVELOPE's BResKind.
+const (
+	ResKindNotice = "notice" // a NOTICE body too large for one packet
+	ResKindMOTD   = "motd"   // hub message-of-the-day
+	ResKindBlob   = "blob"   // opaque client payload
 )
 
 // WELCOME body keys.

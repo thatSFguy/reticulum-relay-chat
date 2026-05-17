@@ -22,6 +22,11 @@ var version = "0.1.0-dev"
 func main() {
 	configPath := flag.String("config", "rrc-hub.toml", "path to the TOML config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	// Optional overrides. The config file remains the primary mechanism;
+	// these only take effect when explicitly passed on the command line.
+	identityPath := flag.String("identity", "", "override hub.identity_path")
+	hubName := flag.String("hub-name", "", "override hub.name")
+	noAnnounce := flag.Bool("no-announce", false, "force hub.announce_on_start = false")
 	flag.Parse()
 
 	if *showVersion {
@@ -35,6 +40,21 @@ func main() {
 	if err != nil {
 		logger.Fatalf("%v", err)
 	}
+
+	// Apply CLI overrides only for flags the operator actually set, so an
+	// unset flag never clobbers a configured value.
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "identity":
+			cfg.Hub.IdentityPath = *identityPath
+		case "hub-name":
+			cfg.Hub.Name = *hubName
+		case "no-announce":
+			if *noAnnounce {
+				cfg.Hub.AnnounceOnStart = false
+			}
+		}
+	})
 
 	svc, err := service.New(cfg, logger)
 	if err != nil {
