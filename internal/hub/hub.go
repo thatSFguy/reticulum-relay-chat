@@ -64,6 +64,7 @@ type Hub struct {
 	klines  map[string]struct{} // kline-only hashes (hex), for persistence
 
 	started bool
+	closed  bool // set by Stop; OnInbound drops frames once true (audit A9)
 	stats   stats
 }
 
@@ -299,9 +300,12 @@ func (h *Hub) Start(ctx context.Context) {
 	go h.reaperLoop(ctx)
 }
 
-// Stop persists the room registry and klines. Call once on shutdown.
+// Stop marks the hub closed and persists the room registry and klines.
+// Call once on shutdown, after the transport dispatch goroutine has
+// drained (audit A9), so no inbound handler races the persist.
 func (h *Hub) Stop() {
 	h.mu.Lock()
+	h.closed = true
 	h.persistRegistryLocked()
 	h.persistKlinesLocked()
 	h.mu.Unlock()
