@@ -1,0 +1,83 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows
+          - { goos: windows, goarch: amd64, name: windows-amd64, ext: .exe }
+          # Linux x86-64
+          - { goos: linux,   goarch: amd64, name: linux-amd64 }
+          # Raspberry Pi — 64-bit OS (Pi 3 / 4 / 5)
+          - { goos: linux,   goarch: arm64, name: linux-arm64 }
+          # Raspberry Pi — 32-bit OS (Pi 2 / 3 / 4)
+          - { goos: linux,   goarch: arm, goarm: '7', name: linux-armv7 }
+          # Raspberry Pi — ARMv6 (Pi 1 / Zero / Zero W)
+          - { goos: linux,   goarch: arm, goarm: '6', name: linux-armv6 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build rrc-hub (${{ matrix.name }})
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          out="rrc-hub-${{ matrix.name }}${{ matrix.ext }}"
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o "dist/${out}" ./cmd/rrc-hub
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rrc-hub-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # On a pushed tag (v*), collect every binary into a GitHub Release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${GITHUB_REF_NAME}"
+          dist/*
+          --repo "${GITHUB_REPOSITORY}"
+          --title "${GITHUB_REF_NAME}"
+          --generate-notes
