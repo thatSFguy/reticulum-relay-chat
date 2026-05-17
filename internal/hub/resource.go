@@ -20,8 +20,9 @@ type resourceExpectation struct {
 	expiresMs int64
 }
 
-// handleResourceEnvelope processes a T_RESOURCE_ENVELOPE (type 50). It is
-// accepted even pre-WELCOME.
+// handleResourceEnvelope processes a T_RESOURCE_ENVELOPE (type 50). The
+// OnInbound WELCOME gate guarantees the session is welcomed and
+// identity-verified before this runs (A11).
 func (s *Session) handleResourceEnvelope(env *rrc.Envelope) {
 	h := s.hub
 	if !h.cfg.EnableResourceTransfer {
@@ -136,12 +137,40 @@ func (s *Session) OnResourceConcluded(payload []byte) {
 
 	switch matched.kind {
 	case rrc.ResKindNotice:
+		// A resource-delivered NOTICE must clear the same room gates a
+		// normal MSG/NOTICE does (A20) — otherwise a banned, moderated, or
+		// non-member peer could post into any room by sending the text as
+		// a Resource instead of inline.
 		room := matched.room
-		var recipients []Link
-		h.mu.Lock()
-		if r := h.roomLocked(room); r != nil {
-			recipients = roomLinksExceptLocked(r, s)
+		id := s.identity()
+		idHex := ""
+		if id != nil {
+			idHex = hex.EncodeToString(id)
 		}
+		h.mu.Lock()
+		r := h.roomLocked(room)
+		if r == nil {
+			h.mu.Unlock()
+			s.sendError(&room, "no such room")
+			return
+		}
+		joined := r.hasMember(s)
+		if _, banned := r.bans[idHex]; banned && idHex != "" {
+			h.mu.Unlock()
+			s.sendError(&room, "banned from room")
+			return
+		}
+		if r.noOutsideMsgs && !joined {
+			h.mu.Unlock()
+			s.sendError(&room, "no outside messages (+n)")
+			return
+		}
+		if r.moderated && !r.isVoiced(idHex, h.isServerOp(id)) {
+			h.mu.Unlock()
+			s.sendError(&room, "room is moderated (+m)")
+			return
+		}
+		recipients := roomLinksExceptLocked(r, s)
 		h.mu.Unlock()
 		notice := rrc.Notice(matched.srcSender, h.now(), &room, string(payload))
 		h.fanout(recipients, notice)

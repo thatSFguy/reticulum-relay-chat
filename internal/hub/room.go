@@ -152,10 +152,15 @@ func (r *Room) modeString() string {
 // founder, or in the ops set. h must hold the hub lock; serverOp is the
 // already-computed server-op result.
 func (r *Room) isOp(idHex string, serverOp bool) bool {
+	// An empty identity is never an operator (A1): an un-identified peer
+	// must not inherit ops, and a founderless room ("") confers nothing.
+	if idHex == "" {
+		return false
+	}
 	if serverOp {
 		return true
 	}
-	if idHex != "" && idHex == r.founder {
+	if idHex == r.founder {
 		return true
 	}
 	_, ok := r.ops[idHex]
@@ -164,6 +169,9 @@ func (r *Room) isOp(idHex string, serverOp bool) bool {
 
 // isVoiced reports whether the identity may speak in a +m room.
 func (r *Room) isVoiced(idHex string, serverOp bool) bool {
+	if idHex == "" {
+		return false
+	}
 	if r.isOp(idHex, serverOp) {
 		return true
 	}

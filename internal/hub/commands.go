@@ -504,10 +504,17 @@ func (s *Session) cmdTopic(parts []string, room string) {
 	}
 
 	if len(parts) == 2 {
-		// View.
+		// View. A private (+p) room's topic is disclosed only to members
+		// and server-ops (A13) — /list already hides +p rooms, /topic must
+		// not leak them.
 		h.mu.Lock()
 		topic := ""
 		if r := h.roomLocked(target); r != nil {
+			if r.private && !h.isServerOp(s.identity()) && !r.hasMember(s) {
+				h.mu.Unlock()
+				s.sendNotice(roomPtr(room), "room "+target+" is private")
+				return
+			}
 			topic = r.topic
 		}
 		h.mu.Unlock()
