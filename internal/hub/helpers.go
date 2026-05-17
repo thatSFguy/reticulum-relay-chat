@@ -84,6 +84,20 @@ func parseHexHash(tok string) (string, error) {
 	return n, nil
 }
 
+// aclHasRoom reports whether a per-room ACL set (ops / voiced / bans)
+// can take one more entry without exceeding the configured cap (audit
+// A15). A cap <= 0 disables the limit; re-adding an already-present key
+// is always allowed since it does not grow the set.
+func aclHasRoom[V any](m map[string]V, key string, cap int) bool {
+	if cap <= 0 {
+		return true
+	}
+	if _, exists := m[key]; exists {
+		return true
+	}
+	return len(m) < cap
+}
+
 // looksLikeHashPrefix reports whether a token should be treated as an
 // identity-hash prefix rather than a nick: all-hex (after 0x strip) and
 // at least 6 chars long.

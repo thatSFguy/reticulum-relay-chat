@@ -43,6 +43,13 @@ type HubConfig struct {
 	// Behavior.
 	IncludeJoinedMemberList bool `toml:"include_joined_member_list"`
 
+	// DoS caps. A zero (or negative) value disables the individual cap,
+	// letting an operator opt out. Defaults are applied by Load.
+	MaxSessions                   int `toml:"max_sessions"`
+	MaxRooms                      int `toml:"max_rooms"`
+	MaxRegisteredRoomsPerIdentity int `toml:"max_registered_rooms_per_identity"`
+	MaxRoomAclEntries             int `toml:"max_room_acl_entries"`
+
 	// Hub-initiated keepalive. A zero PingInterval disables hub PINGs; a
 	// zero PingTimeout disables tearing a link down for a missing PONG.
 	PingInterval Duration `toml:"ping_interval"`
@@ -108,6 +115,10 @@ func defaults() Config {
 			RoomRegistryPruneInterval:      Duration{time.Hour},
 			RoomInviteTimeout:              Duration{15 * time.Minute},
 			IncludeJoinedMemberList:        false,
+			MaxSessions:                    256,
+			MaxRooms:                       512,
+			MaxRegisteredRoomsPerIdentity:  16,
+			MaxRoomAclEntries:              256,
 			PingInterval:                   Duration{0},
 			PingTimeout:                    Duration{0},
 			EnableResourceTransfer:         true,

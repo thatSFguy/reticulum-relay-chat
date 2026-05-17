@@ -13,6 +13,8 @@ type Session struct {
 	hub  *Hub
 	link Link
 
+	createdMs int64 // session creation time (ms), for the idle-unwelcomed sweep
+
 	mu       sync.Mutex
 	welcomed bool
 	closed   bool
@@ -29,14 +31,26 @@ type Session struct {
 // session is not usable until the client sends HELLO.
 func (h *Hub) NewSession(link Link) *Session {
 	s := &Session{
-		hub:    h,
-		link:   link,
-		joined: make(map[string]*Room),
-		bucket: newTokenBucket(h.limits.RateLimitMsgsPerMin, h.now()),
+		hub:       h,
+		link:      link,
+		joined:    make(map[string]*Room),
+		bucket:    newTokenBucket(h.limits.RateLimitMsgsPerMin, h.now()),
+		createdMs: h.now(),
 	}
 	h.mu.Lock()
-	h.sessions[s] = struct{}{}
+	// Cap concurrent sessions (audit A3): a peer must not be able to
+	// exhaust hub memory by opening unbounded links.
+	full := h.cfg.MaxSessions > 0 && len(h.sessions) >= h.cfg.MaxSessions
+	if !full {
+		h.sessions[s] = struct{}{}
+	}
 	h.mu.Unlock()
+	if full {
+		h.log.Printf("hub: session limit (%d) reached — refusing new link", h.cfg.MaxSessions)
+		s.sendError(nil, "server full")
+		s.Close()
+		return s
+	}
 
 	// A peer already in the ban set is refused as soon as it is known.
 	if id := link.PeerIdentityHash(); id != nil {
@@ -63,23 +77,34 @@ func (s *Session) identityHex() string {
 // OnInbound feeds one decoded inbound link-DATA frame.
 func (s *Session) OnInbound(frame []byte) {
 	h := s.hub
+	// A closed session (e.g. refused at the MaxSessions cap, or torn
+	// down) must not process further frames even if a stale reference
+	// to it still routes inbound DATA here.
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return
+	}
 	h.statInc(&h.stats.pktsIn)
 	h.statAdd(&h.stats.bytesIn, int64(len(frame)))
 
-	env, err := rrc.Decode(frame)
-	if err != nil {
-		h.statInc(&h.stats.pktsBad)
-		h.log.Printf("rrc: dropped malformed inbound frame: %v", err)
-		return
-	}
-
-	// Rate limit every inbound packet via the token bucket.
+	// Rate limit BEFORE decode (audit A19): CBOR decoding is itself
+	// attacker-driven work, so a flood of malformed frames must be
+	// throttled by the token bucket too — not just well-formed traffic.
 	s.mu.Lock()
 	allowed := s.bucket.allow(h.now())
 	s.mu.Unlock()
 	if !allowed {
 		h.statInc(&h.stats.rateLimited)
 		s.sendError(nil, "rate limited")
+		return
+	}
+
+	env, err := rrc.Decode(frame)
+	if err != nil {
+		h.statInc(&h.stats.pktsBad)
+		h.log.Printf("rrc: dropped malformed inbound frame: %v", err)
 		return
 	}
 
@@ -294,6 +319,13 @@ func (s *Session) handleJoin(env *rrc.Envelope) {
 	r := h.roomLocked(room)
 	created := false
 	if r == nil {
+		// Cap the total room count (audit A3): a JOIN→/register→PART
+		// loop must not be able to grow the room table without bound.
+		if h.cfg.MaxRooms > 0 && len(h.rooms) >= h.cfg.MaxRooms {
+			h.mu.Unlock()
+			s.sendError(&room, "room limit reached")
+			return
+		}
 		r = h.createRoomLocked(room, id)
 		created = true
 	}
