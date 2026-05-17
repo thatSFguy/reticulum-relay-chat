@@ -16,6 +16,15 @@ const (
 	hdlcEscMask = 0x20
 )
 
+// maxHDLCFrameSize bounds the un-escaped payload of a single HDLC frame.
+// A Reticulum packet on a TCP interface is normally near ReticulumMTU
+// (500 bytes) and at most a few KiB even with link MTU discovery; 64 KiB
+// is generous headroom for any legitimate frame while still capping a
+// peer that streams an unterminated frame from OOMing the process before
+// any authentication (audit A5). An over-cap frame is discarded and the
+// decoder resyncs to the next flag.
+const maxHDLCFrameSize = 64 * 1024
+
 // EncodeHDLC wraps a packet in HDLC framing: FLAG || escape(p) || FLAG.
 func EncodeHDLC(p []byte) []byte {
 	out := make([]byte, 0, len(p)+2)
@@ -63,8 +72,17 @@ func (d *HDLCDecoder) NextFrame() ([]byte, error) {
 		out := []byte{}
 		// Process the first byte (might be an ESC).
 		b := first
+		// oversized marks a frame that has exceeded maxHDLCFrameSize: we
+		// stop buffering but keep scanning for the closing FLAG, so a
+		// peer streaming an unterminated frame cannot OOM us (audit A5).
+		// The oversized frame is then discarded and decoding resyncs to
+		// the next frame.
+		oversized := false
 		for {
 			if b == hdlcFlag {
+				if oversized {
+					break // discard the oversized frame, resync
+				}
 				return out, nil
 			}
 			if b == hdlcEsc {
@@ -75,9 +93,15 @@ func (d *HDLCDecoder) NextFrame() ([]byte, error) {
 					}
 					return nil, err
 				}
-				out = append(out, next^hdlcEscMask)
-			} else {
+				if !oversized {
+					out = append(out, next^hdlcEscMask)
+				}
+			} else if !oversized {
 				out = append(out, b)
+			}
+			if !oversized && len(out) > maxHDLCFrameSize {
+				oversized = true
+				out = nil
 			}
 			b, err = d.r.ReadByte()
 			if err != nil {

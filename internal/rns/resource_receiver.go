@@ -73,6 +73,7 @@ type ResourceReceiver struct {
 	// Indexed by hashmap position (0-based).
 	parts         [][]byte
 	receivedCount int
+	receivedBytes int    // running total of placed part lengths (audit A12)
 	receivedFlags []bool // parts[i] arrived?
 
 	// Channels: dispatcher → receiver goroutine.
@@ -188,6 +189,11 @@ func (rr *ResourceReceiver) HandleCancel() {
 // is the raw ciphertext slice; receiver matches by computing its
 // 4-byte map_hash against its hashmap window.
 func (rr *ResourceReceiver) HandlePart(partCiphertext []byte) {
+	// Drop parts arriving on a link that is no longer Active (audit
+	// A12) — a dead link can never complete a transfer.
+	if !rr.link.IsActive() {
+		return
+	}
 	select {
 	case rr.partCh <- append([]byte(nil), partCiphertext...):
 	default:
@@ -315,6 +321,11 @@ func (rr *ResourceReceiver) Run(ctx context.Context) error {
 // placePart locates the part's hashmap slot via map_hash, drops it
 // in. Idempotent on duplicate parts (they just no-op).
 func (rr *ResourceReceiver) placePart(part []byte) error {
+	// Reject an over-long part before buffering it (audit A12): a
+	// well-formed Resource part never exceeds one ResourceSDU.
+	if len(part) > ResourceSDU {
+		return fmt.Errorf("resource part too large: %d > %d bytes", len(part), ResourceSDU)
+	}
 	mh := ResourceMapHash(part, rr.randomR)
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
@@ -324,9 +335,16 @@ func (rr *ResourceReceiver) placePart(part []byte) error {
 		}
 		off := i * ResourceMapHashLen
 		if bytesEqual(rr.hashmap[off:off+ResourceMapHashLen], mh) {
+			// Abort once buffered parts exceed the advertised transfer
+			// size (audit A12) — never accumulate past what the ADV
+			// promised.
+			if rr.expectedSize > 0 && rr.receivedBytes+len(part) > rr.expectedSize {
+				return fmt.Errorf("resource parts exceed advertised transfer size %d", rr.expectedSize)
+			}
 			rr.parts[i] = part
 			rr.receivedFlags[i] = true
 			rr.receivedCount++
+			rr.receivedBytes += len(part)
 			return nil
 		}
 	}

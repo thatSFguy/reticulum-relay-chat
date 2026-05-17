@@ -33,7 +33,10 @@ type Envelope struct {
 	Nick        *string
 }
 
-var canonicalEnc cbor.EncMode
+var (
+	canonicalEnc cbor.EncMode
+	hardenedDec  cbor.DecMode
+)
 
 func init() {
 	em, err := cbor.CanonicalEncOptions().EncMode()
@@ -41,6 +44,22 @@ func init() {
 		panic("rrc: cbor canonical enc mode: " + err.Error())
 	}
 	canonicalEnc = em
+
+	// Hardened decode mode. An RRC envelope is a small CBOR map (≤8 keys,
+	// a handful of shallow nested body maps/arrays). The default decoder
+	// permits 128k-element arrays/maps and 32 nesting levels, so a tiny
+	// attacker-controlled inbound frame can still expand into a CPU/heap
+	// spike on the single dispatch goroutine (audit A4). These caps stay
+	// well above any legitimate RRC frame while bounding a decode bomb.
+	dm, err := cbor.DecOptions{
+		MaxNestedLevels:  16,
+		MaxArrayElements: 1024,
+		MaxMapPairs:      256,
+	}.DecMode()
+	if err != nil {
+		panic("rrc: cbor hardened dec mode: " + err.Error())
+	}
+	hardenedDec = dm
 }
 
 // FreshID returns MsgIDLength fresh random bytes for an envelope KID.
@@ -83,7 +102,7 @@ func (e *Envelope) Encode() ([]byte, error) {
 // rejected.
 func Decode(b []byte) (*Envelope, error) {
 	var raw map[any]any
-	if err := cbor.Unmarshal(b, &raw); err != nil {
+	if err := hardenedDec.Unmarshal(b, &raw); err != nil {
 		return nil, fmt.Errorf("rrc: envelope is not a CBOR map: %w", err)
 	}
 	return fromMap(raw)

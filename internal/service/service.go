@@ -52,6 +52,13 @@ func isIdentifyLen(n int) bool {
 // an error and the hub falls back to chunked NOTICEs.
 const resourceSendTimeout = 30 * time.Second
 
+// maxLinkFrame caps an inbound link-DATA frame before it reaches the
+// CBOR decoder. Every RRC envelope rides a single Reticulum link DATA
+// packet, bounded by the link MDU (< 500 bytes); a frame far above that
+// is malformed and must not be decoded (audit A4). Large payloads use
+// the RNS Resource path, which is handled separately.
+const maxLinkFrame = 8 * 1024
+
 // parseIdentifyFrame extracts the public key and signature from a
 // decrypted LINKIDENTIFY payload, accepting both the 128-byte upstream
 // form and the 144-byte legacy form. ok is false for any other length,
@@ -210,6 +217,10 @@ func (s *Service) onPacket(p *rns.Packet) {
 // CBOR envelope is routed to the link's hub session; a LINKIDENTIFY
 // frame is used to bind the peer's verified identity.
 func (s *Service) onLinkData(linkID, plaintext []byte) {
+	if len(plaintext) > maxLinkFrame {
+		s.log.Printf("rrc: dropped oversized %d-byte link frame on %x", len(plaintext), linkID[:4])
+		return
+	}
 	if _, err := rrc.Decode(plaintext); err == nil {
 		s.sessionFor(linkID).OnInbound(plaintext)
 		return
