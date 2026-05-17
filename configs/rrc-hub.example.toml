@@ -1,33 +1,103 @@
 # Example configuration for the Reticulum Relay Chat hub (rrc-hub).
 # Copy to rrc-hub.toml and edit, then run:  rrc-hub -config rrc-hub.toml
+#
+# Every key below shows its default in the trailing comment. Keys you
+# omit keep their default — only [[interfaces]] is mandatory.
+#
+# CLI overrides (apply only when the flag is passed):
+#   -identity PATH   overrides hub.identity_path
+#   -hub-name NAME   overrides hub.name
+#   -no-announce     forces hub.announce_on_start = false
 
 [hub]
-# Display name shown to clients in the WELCOME message.
+# Display name shown to clients in the WELCOME message. (default "RRC Hub")
 name = "RRC Hub"
 
-# Software version string advertised in WELCOME.
+# Software version string advertised in WELCOME. (default "rrc-hub-go/0.1.0")
 version = "rrc-hub-go/0.1.0"
 
-# Optional message-of-the-day, delivered as NOTICE messages right after
-# WELCOME (chunked to fit the link MTU). Leave empty to disable.
+# Optional message-of-the-day, delivered as NOTICE(s) right after
+# WELCOME. Text over 512 bytes is sent as an RNS Resource when resource
+# transfer is enabled, otherwise chunked into MTU-sized NOTICEs. Leave
+# empty to disable. (default "")
 greeting = "Welcome to the hub. Use /join <room> in your client to start chatting."
 
 # Where the hub's long-term Reticulum identity is stored. Created on
 # first run if it does not exist. The destination hash clients add is
-# derived from this identity + the rrc.hub aspect.
+# derived from this identity + the rrc.hub aspect. (default "hub_identity")
 identity_path = "hub_identity"
 
+# RNS destination aspect the hub announces under. (default "rrc.hub")
+dest_name = "rrc.hub"
+
+# Announce the rrc.hub destination immediately at startup. When false,
+# the first announce waits a full announce_interval. (default true)
+announce_on_start = true
+
 # How often the hub re-announces its rrc.hub destination so relays keep
-# a fresh path and clients can discover it.
+# a fresh path and clients can discover it. (default "5m")
 announce_interval = "5m"
 
+# Hex identity hashes of server operators. A trusted identity may run
+# server-op commands (/reload, /stats, /kline, ...). (default [])
+trusted_identities = []
+
+# Hex identity hashes refused at link-identify time. Combined with the
+# kline list; a banned peer is sent ERROR "banned" and disconnected as
+# soon as its identity is known. (default [])
+banned_identities = []
+
+# Path to the persisted room registry (rooms.toml). Empty disables room
+# registration persistence. (default "")
+room_registry_path = "rooms.toml"
+
+# Path to the persisted kline list. Empty disables kline persistence.
+# (default "")
+kline_path = "klines.txt"
+
+# A registered room with no connected members is pruned once it has been
+# idle this long. Pruning is disabled if this or the interval is zero.
+# (default "720h" = 30 days)
+room_registry_prune_after = "720h"
+
+# How often the prune sweep runs. (default "1h")
+room_registry_prune_interval = "1h"
+
+# Time-to-live for a room invite created by /invite. (default "15m")
+room_invite_timeout = "15m"
+
+# Include the member-hash list in JOINED/PARTED broadcasts. (default false)
+include_joined_member_list = false
+
+# Hub-initiated keepalive. A zero ping_interval disables hub PINGs; a
+# zero ping_timeout disables tearing a link down for a missing PONG.
+# (defaults: ping_interval "0s", ping_timeout "0s")
+ping_interval = "0s"
+ping_timeout = "0s"
+
+# Allow large payloads to transfer as RNS Resources (greeting/MOTD over
+# 512 bytes, inbound RESOURCE_ENVELOPE handling). (default true)
+enable_resource_transfer = true
+
+# Largest RNS Resource the hub will accept from a client, in bytes.
+# (default 262144)
+max_resource_bytes = 262144
+
+# Maximum number of un-concluded inbound resource expectations a single
+# session may have pending at once. (default 8)
+max_pending_resource_expectations = 8
+
+# How long a pending inbound resource expectation lives before the
+# reaper drops it. (default "30s")
+resource_expectation_ttl = "30s"
+
 [hub.limits]
-# Limits advertised to clients in WELCOME and enforced hub-side.
-max_nick_bytes = 32
-max_room_name_bytes = 64
-max_msg_body_bytes = 4096
-max_rooms_per_session = 16
-rate_limit_msgs_per_minute = 30
+# Client-facing limits advertised in WELCOME and enforced hub-side.
+max_nick_bytes = 32                  # (default 32)
+max_room_name_bytes = 64             # (default 64)
+max_msg_body_bytes = 350             # (default 350)
+max_rooms_per_session = 32           # (default 32)
+rate_limit_msgs_per_minute = 240     # token-bucket capacity (default 240)
 
 # One or more Reticulum transport attachments. Only tcp_client is
 # supported — attach to any rnsd TCPServerInterface. Use a public

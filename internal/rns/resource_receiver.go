@@ -103,6 +103,7 @@ func (t *Transport) openResourceReceiver(link *Link, adv *ResourceAdvertisement)
 	signing := append([]byte(nil), link.Signing...)
 	encryption := append([]byte(nil), link.Encryption...)
 	cb := link.OnInboundData
+	linkID := append([]byte(nil), link.ID...)
 	link.mu.Unlock()
 	if state != LinkActive {
 		return fmt.Errorf("resource receiver: link state %s, want active", state)
@@ -145,10 +146,16 @@ func (t *Transport) openResourceReceiver(link *Link, adv *ResourceAdvertisement)
 		done:               make(chan struct{}),
 		linkSigning:        signing,
 		linkEncryption:     encryption,
+		// A link with a per-link OnInboundData (e.g. LXMF Delivery)
+		// receives the assembled body there. A link without one (e.g.
+		// the RRC hub, which routes by link_id) gets it through the
+		// LinkManager's resource-assembled fallback instead.
 		OnAssembled: func(body []byte) {
 			if cb != nil {
 				cb(body)
+				return
 			}
+			t.linkManager.deliverAssembledResource(linkID, body)
 		},
 	}
 	rr.state.Store(int32(ResourceStateTransferring))
