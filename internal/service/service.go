@@ -233,16 +233,34 @@ func (s *Service) onResourceAssembled(linkID, body []byte) {
 
 // sessionFor returns the hub session for a link, creating it on first
 // reference.
+//
+// hub.NewSession must be called WITHOUT s.mu held: it calls back into the
+// link (PeerIdentityHash for the banned-peer check, and Close for a
+// banned peer), and those re-enter s.mu via peerIdentity/dropSession.
+// Holding s.mu across NewSession self-deadlocks the transport dispatch
+// goroutine — which silently wedges all inbound packet processing.
 func (s *Service) sessionFor(linkID []byte) *hub.Session {
 	key := hex.EncodeToString(linkID)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess := s.sessions[key]
-	if sess == nil {
-		sess = s.hub.NewSession(&rnsLink{svc: s, linkID: append([]byte(nil), linkID...)})
-		s.sessions[key] = sess
+	s.mu.Unlock()
+	if sess != nil {
+		return sess
 	}
-	return sess
+
+	created := s.hub.NewSession(&rnsLink{svc: s, linkID: append([]byte(nil), linkID...)})
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Inbound DATA for one link is dispatched by a single goroutine, so
+	// a creation race is not expected; the re-check is defensive — on a
+	// lost race the winner is authoritative (closing the loser would
+	// tear down the shared link).
+	if existing := s.sessions[key]; existing != nil {
+		return existing
+	}
+	s.sessions[key] = created
+	return created
 }
 
 // handleIdentify parses a §6.6 LINKIDENTIFY frame (either accepted
