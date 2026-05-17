@@ -98,7 +98,9 @@ func IdentityFromFile(path string) (*Identity, error) {
 // Save writes the 64-byte private key to path with 0600 permissions, creating
 // parent directories as needed. Atomic via tempfile rename.
 func (id *Identity) Save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// The directory holds the long-term private key — keep it owner-only
+	// (audit A17); the key file itself is already written 0600.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".identity-*")
