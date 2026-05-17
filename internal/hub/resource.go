@@ -197,10 +197,17 @@ func (s *Session) reapExpectations(nowMs int64) {
 	s.mu.Unlock()
 }
 
-// tryResourceSend attempts to deliver payload as an RNS Resource. It first
-// sends a RESOURCE_ENVELOPE, then calls Link.SendResource. Returns false
-// (caller falls back to chunked NOTICEs) when resource transfer is
-// unavailable.
+// tryResourceSend attempts to deliver payload as an RNS Resource. It
+// sends the RESOURCE_ENVELOPE synchronously, then drives the actual
+// Resource transfer on a background goroutine. Returns false (caller
+// falls back to chunked NOTICEs) only when resource transfer is
+// configured off; otherwise it returns true and owns delivery.
+//
+// The transfer itself blocks up to ~30s inside the rns sender. Running
+// it off the inbound-dispatch goroutine (audit A6) is essential: a
+// single slow or stalled transfer must not freeze inbound processing
+// for every other connected client. On transfer failure the goroutine
+// falls back to chunked NOTICEs itself.
 func (s *Session) tryResourceSend(payload []byte, kind string, room *string) bool {
 	h := s.hub
 	if !h.cfg.EnableResourceTransfer {
@@ -211,10 +218,16 @@ func (s *Session) tryResourceSend(payload []byte, kind string, room *string) boo
 	env := rrc.ResourceEnvelope(h.identityHash, h.now(), room, rid, kind,
 		len(payload), sum[:], "")
 	s.send(env)
-	if err := s.link.SendResource(payload); err != nil {
-		h.log.Printf("resource: SendResource failed, falling back to chunks: %v", err)
-		return false
-	}
-	h.statInc(&h.stats.resourcesSent)
+
+	go func() {
+		if err := s.link.SendResource(payload); err != nil {
+			h.log.Printf("resource: SendResource failed, falling back to chunks: %v", err)
+			for _, chunk := range chunkText(string(payload)) {
+				s.sendNotice(room, chunk)
+			}
+			return
+		}
+		h.statInc(&h.stats.resourcesSent)
+	}()
 	return true
 }
