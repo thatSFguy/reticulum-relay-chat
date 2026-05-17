@@ -62,16 +62,24 @@ func normHex(s string) string {
 	return s
 }
 
-// parseHexHash parses a token as an identity hash: optional "0x" prefix,
-// whitespace tolerated, must be valid lowercase hex of at least 4 bytes.
+// identityHashLen is the byte length of a full RNS identity hash
+// (SHA-256 truncated to 16 bytes — rns.IdentityHashLen).
+const identityHashLen = 16
+
+// parseHexHash parses a token as a full identity hash for use as a STORED
+// ban/kline/invite key: optional "0x" prefix, whitespace tolerated, must
+// be valid lowercase hex of exactly identityHashLen bytes. A short prefix
+// is rejected (A14): ban sets are keyed by the full 16-byte hash, so a
+// stored short entry would silently never match isBanned — a dead ban.
+// Live-session prefix matching stays valid via resolveTargetLocked.
 func parseHexHash(tok string) (string, error) {
 	n := normHex(tok)
 	b, err := hex.DecodeString(n)
 	if err != nil {
 		return "", fmt.Errorf("not valid hex")
 	}
-	if len(b) < 4 {
-		return "", fmt.Errorf("identity hash too short (need >= 4 bytes)")
+	if len(b) != identityHashLen {
+		return "", fmt.Errorf("identity hash must be exactly %d bytes", identityHashLen)
 	}
 	return n, nil
 }

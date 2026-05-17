@@ -83,17 +83,34 @@ func (s *Session) OnInbound(frame []byte) {
 		return
 	}
 
-	// PONG and RESOURCE_ENVELOPE are processed even pre-WELCOME.
-	switch env.Type {
-	case rrc.TPong:
-		s.handlePong(env)
+	// A verified RNS identity (bound via §6.6 LINKIDENTIFY) is a hard
+	// precondition for processing any RRC frame: an un-identified peer is
+	// never welcomed and never authorized (A1). Rechecking it on every
+	// frame also closes ban evasion (A2) — a banned identity that sent
+	// HELLO before LINKIDENTIFY is caught the moment its identity binds.
+	id := s.identity()
+	if id == nil {
+		s.sendError(nil, "identify (LINKIDENTIFY) required before any RRC frame")
 		return
-	case rrc.TResourceEnvelope:
-		s.handleResourceEnvelope(env)
+	}
+	h.mu.Lock()
+	banned := h.isBanned(id)
+	h.mu.Unlock()
+	if banned {
+		s.sendError(nil, "banned")
+		s.Close()
 		return
 	}
 
-	// WELCOME gate.
+	// PONG answers a hub keepalive and is accepted even before WELCOME.
+	if env.Type == rrc.TPong {
+		s.handlePong(env)
+		return
+	}
+
+	// WELCOME gate — every frame except HELLO requires a welcomed session.
+	// RESOURCE_ENVELOPE is included (A11): an un-welcomed peer must not be
+	// able to pin receive-buffer memory with resource expectations.
 	if env.Type != rrc.THello && !s.isWelcomed() {
 		s.sendError(nil, "send HELLO first")
 		return
@@ -102,6 +119,8 @@ func (s *Session) OnInbound(frame []byte) {
 	switch env.Type {
 	case rrc.THello:
 		s.handleHello(env)
+	case rrc.TResourceEnvelope:
+		s.handleResourceEnvelope(env)
 	case rrc.TJoin:
 		s.handleJoin(env)
 	case rrc.TPart:
