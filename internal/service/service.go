@@ -46,6 +46,12 @@ func isIdentifyLen(n int) bool {
 	return n == identifyLenUpstream || n == identifyLenLegacy
 }
 
+// resourceSendTimeout bounds one outbound RNS Resource transfer to a
+// client. Generous enough for a slow mesh link to complete the
+// ADV/REQ/PART/PRF round-trips; on expiry rnsLink.SendResource returns
+// an error and the hub falls back to chunked NOTICEs.
+const resourceSendTimeout = 30 * time.Second
+
 // parseIdentifyFrame extracts the public key and signature from a
 // decrypted LINKIDENTIFY payload, accepting both the 128-byte upstream
 // form and the 144-byte legacy form. ok is false for any other length,
@@ -94,18 +100,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 		sessions:   make(map[string]*hub.Session),
 		identities: make(map[string][]byte),
 	}
-	svc.hub = hub.New(id.Hash(), hub.Config{
-		Name:     cfg.Hub.Name,
-		Version:  cfg.Hub.Version,
-		Greeting: cfg.Hub.Greeting,
-		Limits: rrc.Limits{
-			MaxNickBytes:        cfg.Hub.Limits.MaxNickBytes,
-			MaxRoomNameBytes:    cfg.Hub.Limits.MaxRoomNameBytes,
-			MaxMsgBodyBytes:     cfg.Hub.Limits.MaxMsgBodyBytes,
-			MaxRoomsPerSession:  cfg.Hub.Limits.MaxRoomsPerSession,
-			RateLimitMsgsPerMin: cfg.Hub.Limits.RateLimitMsgsPerMin,
-		},
-	}, logger)
+	svc.hub = hub.New(id.Hash(), cfg.Hub, logger)
 
 	if err := svc.transport.RegisterLocal(&rns.LocalDestination{
 		DestHash:      svc.destHash,
@@ -123,6 +118,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 		return nil, fmt.Errorf("register rrc.hub destination: %w", err)
 	}
 	svc.transport.LinkManager().SetDefaultInboundDataHandler(svc.onLinkData)
+	svc.transport.LinkManager().SetResourceAssembledHandler(svc.onResourceAssembled)
 
 	logger.Printf("RRC hub %q — dest_name=%s dest_hash=%s identity=%s",
 		cfg.Hub.Name, hubAspect, hex.EncodeToString(svc.destHash), id.HexHash())
@@ -149,13 +145,23 @@ func (s *Service) Run(ctx context.Context) error {
 	go s.announceLoop(ctx)
 	go s.janitor(ctx)
 
-	// Announce immediately so clients can path to us without waiting a
-	// full interval.
-	s.announceOnce()
+	// The hub owns its own background loops (keepalive PING, room-registry
+	// prune, resource-expectation reaper). Start them once the transport
+	// is up so a PING never races an un-attached interface.
+	s.hub.Start(ctx)
+
+	// Announce immediately only when configured to — otherwise the first
+	// announce waits a full announce_interval. The periodic announceLoop
+	// runs regardless.
+	if s.cfg.Hub.AnnounceOnStart {
+		s.announceOnce()
+	}
 	s.log.Printf("RRC hub running — add this hub in a client by hash: %s", s.DestHashHex())
 
 	<-ctx.Done()
 	s.log.Printf("shutdown: closing %d session(s)", s.hub.SessionCount())
+	// Persist the room registry and klines before exit.
+	s.hub.Stop()
 	return nil
 }
 
@@ -215,18 +221,46 @@ func (s *Service) onLinkData(linkID, plaintext []byte) {
 	s.log.Printf("rrc: dropped %d-byte non-RRC link frame on %x", len(plaintext), linkID[:4])
 }
 
+// onResourceAssembled receives the reassembled body of an inbound RNS
+// Resource a client advertised, routed by link_id. It hands the payload
+// to the link's hub session, which matches it to a pending
+// RESOURCE_ENVELOPE expectation. The rns ResourceReceiver has already
+// verified the transfer's integrity before this fires.
+func (s *Service) onResourceAssembled(linkID, body []byte) {
+	s.log.Printf("rrc: inbound resource assembled on %x (%d bytes)", linkID[:4], len(body))
+	s.sessionFor(linkID).OnResourceConcluded(body)
+}
+
 // sessionFor returns the hub session for a link, creating it on first
 // reference.
+//
+// hub.NewSession must be called WITHOUT s.mu held: it calls back into the
+// link (PeerIdentityHash for the banned-peer check, and Close for a
+// banned peer), and those re-enter s.mu via peerIdentity/dropSession.
+// Holding s.mu across NewSession self-deadlocks the transport dispatch
+// goroutine — which silently wedges all inbound packet processing.
 func (s *Service) sessionFor(linkID []byte) *hub.Session {
 	key := hex.EncodeToString(linkID)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess := s.sessions[key]
-	if sess == nil {
-		sess = s.hub.NewSession(&rnsLink{svc: s, linkID: append([]byte(nil), linkID...)})
-		s.sessions[key] = sess
+	s.mu.Unlock()
+	if sess != nil {
+		return sess
 	}
-	return sess
+
+	created := s.hub.NewSession(&rnsLink{svc: s, linkID: append([]byte(nil), linkID...)})
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Inbound DATA for one link is dispatched by a single goroutine, so
+	// a creation race is not expected; the re-check is defensive — on a
+	// lost race the winner is authoritative (closing the loser would
+	// tear down the shared link).
+	if existing := s.sessions[key]; existing != nil {
+		return existing
+	}
+	s.sessions[key] = created
+	return created
 }
 
 // handleIdentify parses a §6.6 LINKIDENTIFY frame (either accepted
@@ -340,6 +374,38 @@ func (l *rnsLink) Close() {
 }
 
 func (l *rnsLink) PeerIdentityHash() []byte { return l.svc.peerIdentity(l.linkID) }
+
+// SendResource delivers payload to the client as an RNS Resource over
+// this link (SPEC §10). The hub has already sent the matching
+// RESOURCE_ENVELOPE; this drives the actual Resource transfer.
+//
+// The internal/rns package fully implements the responder-side Resource
+// sender (Transport.SendResourceOverLink): it builds the encrypted
+// parts, advertises the resource, fulfills RESOURCE_REQ part requests,
+// and blocks until the client returns a valid RESOURCE_PRF. On any
+// failure (link gone, ADV retries exhausted, peer RESOURCE_RCL, proof
+// mismatch, timeout) it returns an error and the hub falls back to
+// chunked NOTICEs.
+func (l *rnsLink) SendResource(payload []byte) error {
+	if len(payload) == 0 {
+		return errors.New("resource: empty payload")
+	}
+	link := l.svc.transport.LinkManager().Get(l.linkID)
+	if link == nil || !link.IsActive() {
+		return errors.New("resource: link no longer active")
+	}
+	// A responder-side link carries no peerDestHash, so there is no
+	// transit relay to route through — pass a nil transport_id. The
+	// Resource sender keeps every part at HEADER_1 regardless (see
+	// resource_sender.go broadcastAdv), which is correct for a directly
+	// reachable client.
+	ctx, cancel := context.WithTimeout(context.Background(), resourceSendTimeout)
+	defer cancel()
+	if err := l.svc.transport.SendResourceOverLink(ctx, link, payload, nil); err != nil {
+		return fmt.Errorf("resource send on link %x: %w", l.linkID[:4], err)
+	}
+	return nil
+}
 
 // --- identity ---------------------------------------------------------
 

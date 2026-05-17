@@ -1,15 +1,14 @@
 package hub
 
 import (
+	"encoding/hex"
 	"sync"
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
 
 // Session is one connected RRC client — the protocol state machine that
-// rides a single established, identified Reticulum Link. Inbound link
-// DATA frames are fed to OnInbound; the session never blocks the caller
-// on network I/O while holding the hub lock.
+// rides a single established, identified Reticulum Link.
 type Session struct {
 	hub  *Hub
 	link Link
@@ -18,31 +17,88 @@ type Session struct {
 	welcomed bool
 	closed   bool
 	nick     string
-	joined   map[string]*Room
-	msgTimes []int64 // recent MSG wall-clock ms, for rate limiting
+	joined   map[string]*Room // room name -> Room
+	bucket   *tokenBucket
+
+	pingAwaitMs int64 // 0 = not awaiting a PONG
+
+	expectations []*resourceExpectation
 }
 
 // NewSession registers a fresh session for an established link. The
 // session is not usable until the client sends HELLO.
 func (h *Hub) NewSession(link Link) *Session {
-	s := &Session{hub: h, link: link, joined: make(map[string]*Room)}
+	s := &Session{
+		hub:    h,
+		link:   link,
+		joined: make(map[string]*Room),
+		bucket: newTokenBucket(h.limits.RateLimitMsgsPerMin, h.now()),
+	}
 	h.mu.Lock()
 	h.sessions[s] = struct{}{}
 	h.mu.Unlock()
+
+	// A peer already in the ban set is refused as soon as it is known.
+	if id := link.PeerIdentityHash(); id != nil {
+		h.mu.Lock()
+		banned := h.isBanned(id)
+		h.mu.Unlock()
+		if banned {
+			s.sendError(nil, "banned")
+			s.Close()
+		}
+	}
 	return s
 }
 
 func (s *Session) identity() []byte { return s.link.PeerIdentityHash() }
 
-// OnInbound feeds one decrypted inbound link-DATA frame (a CBOR
-// envelope). Decode failures and unhandled types are logged and
-// dropped — a misbehaving client must never crash the hub.
+func (s *Session) identityHex() string {
+	if id := s.identity(); id != nil {
+		return hex.EncodeToString(id)
+	}
+	return ""
+}
+
+// OnInbound feeds one decoded inbound link-DATA frame.
 func (s *Session) OnInbound(frame []byte) {
+	h := s.hub
+	h.statInc(&h.stats.pktsIn)
+	h.statAdd(&h.stats.bytesIn, int64(len(frame)))
+
 	env, err := rrc.Decode(frame)
 	if err != nil {
-		s.hub.log.Printf("rrc: dropped malformed inbound frame: %v", err)
+		h.statInc(&h.stats.pktsBad)
+		h.log.Printf("rrc: dropped malformed inbound frame: %v", err)
 		return
 	}
+
+	// Rate limit every inbound packet via the token bucket.
+	s.mu.Lock()
+	allowed := s.bucket.allow(h.now())
+	s.mu.Unlock()
+	if !allowed {
+		h.statInc(&h.stats.rateLimited)
+		s.sendError(nil, "rate limited")
+		return
+	}
+
+	// PONG and RESOURCE_ENVELOPE are processed even pre-WELCOME.
+	switch env.Type {
+	case rrc.TPong:
+		s.handlePong(env)
+		return
+	case rrc.TResourceEnvelope:
+		s.handleResourceEnvelope(env)
+		return
+	}
+
+	// WELCOME gate.
+	if env.Type != rrc.THello && !s.isWelcomed() {
+		s.sendError(nil, "send HELLO first")
+		return
+	}
+
 	switch env.Type {
 	case rrc.THello:
 		s.handleHello(env)
@@ -51,19 +107,20 @@ func (s *Session) OnInbound(frame []byte) {
 	case rrc.TPart:
 		s.handlePart(env)
 	case rrc.TMsg:
-		s.handleMsg(env)
+		s.handleMsg(env, rrc.TMsg)
+	case rrc.TNotice:
+		s.handleMsg(env, rrc.TNotice)
+	case rrc.TAction:
+		s.handleMsg(env, rrc.TAction)
 	case rrc.TPing:
 		s.handlePing(env)
-	case rrc.TPong:
-		// Client answered a hub keepalive — liveness only, nothing to do.
 	default:
-		s.hub.log.Printf("rrc: unhandled inbound message type %d", env.Type)
+		h.log.Printf("rrc: unhandled inbound message type %d", env.Type)
 	}
 }
 
 // --- outbound helpers -------------------------------------------------
 
-// send encodes and delivers one envelope to this session's client.
 func (s *Session) send(env *rrc.Envelope) {
 	frame, err := env.Encode()
 	if err != nil {
@@ -73,22 +130,42 @@ func (s *Session) send(env *rrc.Envelope) {
 	s.sendFrame(frame)
 }
 
-// sendFrame delivers an already-encoded frame.
 func (s *Session) sendFrame(frame []byte) {
 	if err := s.link.Send(frame); err != nil {
 		s.hub.log.Printf("rrc: link send failed: %v", err)
+		return
 	}
+	s.hub.statAdd(&s.hub.stats.bytesOut, int64(len(frame)))
 }
 
 func (s *Session) sendError(room *string, text string) {
+	s.hub.statInc(&s.hub.stats.errorsSent)
 	s.send(rrc.Error(s.hub.identityHash, s.hub.now(), room, text))
+}
+
+func (s *Session) sendNotice(room *string, text string) {
+	s.send(rrc.Notice(s.hub.identityHash, s.hub.now(), room, text))
 }
 
 // --- HELLO ------------------------------------------------------------
 
 func (s *Session) handleHello(env *rrc.Envelope) {
 	h := s.hub
-	nick := clampNick(rrc.NickName(env), h.cfg.Limits.MaxNickBytes)
+
+	// A re-HELLO after welcome resets the session.
+	if s.isWelcomed() {
+		s.resetForReHello()
+	}
+
+	nick := rrc.NickName(env)
+	if nick == "" {
+		nick = rrc.LegacyHelloNick(env)
+	}
+	if n, ok := normalizeNick(nick, h.limits.MaxNickBytes); ok {
+		nick = n
+	} else {
+		nick = ""
+	}
 
 	s.mu.Lock()
 	s.welcomed = true
@@ -96,21 +173,68 @@ func (s *Session) handleHello(env *rrc.Envelope) {
 	s.mu.Unlock()
 
 	h.log.Printf("session welcomed: %s (nick=%q)", shortHash(s.identity()), nick)
-	s.send(rrc.Welcome(h.identityHash, h.now(), h.cfg.Name, h.cfg.Version,
-		h.cfg.Limits, true))
 
-	// Greeting (message-of-the-day) is delivered after WELCOME as one or
-	// more hub-wide NOTICE messages, chunked to stay within the link MTU.
-	for _, chunk := range chunkText(h.cfg.Greeting) {
-		s.send(rrc.Notice(h.identityHash, h.now(), nil, chunk))
+	// WELCOME body: hub name, version, limits. rrcd does not populate caps.
+	w := rrc.Welcome(h.identityHash, h.now(), h.cfg.Name, h.cfg.Version, h.limits, false)
+	if body, ok := w.Body.(map[int]any); ok {
+		delete(body, rrc.BWelcomeCaps)
 	}
+	s.send(w)
 
-	// Advertise the rooms that already exist on the hub. RRC has no
-	// room-list message, so without this a fresh client cannot discover
-	// a room name to JOIN — it would only ever see rooms it was told
-	// about out-of-band.
-	for _, chunk := range chunkText(h.roomDirectory()) {
-		s.send(rrc.Notice(h.identityHash, h.now(), nil, chunk))
+	// Greeting (MOTD) after WELCOME.
+	s.sendGreeting()
+}
+
+// resetForReHello removes the peer from all rooms and clears its state.
+func (s *Session) resetForReHello() {
+	h := s.hub
+	s.mu.Lock()
+	rooms := make([]*Room, 0, len(s.joined))
+	for _, r := range s.joined {
+		rooms = append(rooms, r)
+	}
+	s.joined = make(map[string]*Room)
+	s.nick = ""
+	s.welcomed = false
+	s.expectations = nil
+	s.mu.Unlock()
+
+	type partedRoom struct {
+		recipients []Link
+		env        *rrc.Envelope
+	}
+	var announce []partedRoom
+	h.mu.Lock()
+	for _, r := range rooms {
+		delete(r.members, s)
+		h.touchRoom(r)
+		announce = append(announce, partedRoom{
+			recipients: roomLinksLocked(r),
+			env:        rrc.Parted(h.identityHash, h.now(), r.Name, r.memberHashesLocked()),
+		})
+		h.dropRoomIfEmptyLocked(r)
+	}
+	h.mu.Unlock()
+	for _, pr := range announce {
+		h.fanout(pr.recipients, pr.env)
+	}
+}
+
+// sendGreeting delivers the configured MOTD as NOTICE(s) (or a resource
+// for large text).
+func (s *Session) sendGreeting() {
+	h := s.hub
+	g := h.cfg.Greeting
+	if g == "" {
+		return
+	}
+	if len(g) > 512 {
+		if s.tryResourceSend([]byte(g), rrc.ResKindMOTD, nil) {
+			return
+		}
+	}
+	for _, chunk := range chunkText(g) {
+		s.sendNotice(nil, chunk)
 	}
 }
 
@@ -118,21 +242,13 @@ func (s *Session) handleHello(env *rrc.Envelope) {
 
 func (s *Session) handleJoin(env *rrc.Envelope) {
 	h := s.hub
-	if !s.isWelcomed() {
-		s.sendError(nil, "send HELLO before joining a room")
-		return
-	}
 	id := s.identity()
-	if id == nil {
-		s.sendError(nil, "link is not identified — RRC requires LINKIDENTIFY")
-		return
-	}
 	room := rrc.RoomName(env)
 	if room == "" {
-		s.sendError(nil, "JOIN requires a room name")
+		s.sendError(nil, "JOIN requires room name")
 		return
 	}
-	if len(room) > h.cfg.Limits.MaxRoomNameBytes {
+	if h.limits.MaxRoomNameBytes > 0 && len(room) > h.limits.MaxRoomNameBytes {
 		s.sendError(&room, "room name exceeds the hub limit")
 		return
 	}
@@ -141,34 +257,88 @@ func (s *Session) handleJoin(env *rrc.Envelope) {
 	s.mu.Lock()
 	if _, already := s.joined[room]; already {
 		s.mu.Unlock()
-		return // idempotent — silently ignore a re-JOIN
+		return // idempotent re-JOIN
 	}
 	roomCount := len(s.joined)
 	s.mu.Unlock()
-	if roomCount >= h.cfg.Limits.MaxRoomsPerSession {
-		s.sendError(&room, "joined-room limit reached for this session")
+	if h.limits.MaxRoomsPerSession > 0 && roomCount >= h.limits.MaxRoomsPerSession {
+		s.sendError(&room, "too many rooms")
 		return
+	}
+
+	idHex := ""
+	if id != nil {
+		idHex = hex.EncodeToString(id)
 	}
 
 	h.mu.Lock()
 	r := h.roomLocked(room)
-	if r.Key != "" && r.Key != key {
+	created := false
+	if r == nil {
+		r = h.createRoomLocked(room, id)
+		created = true
+	}
+	serverOp := h.isServerOp(id)
+	r.pruneInvitesLocked(h.nowUnix())
+
+	// Bans.
+	if _, banned := r.bans[idHex]; banned && idHex != "" {
 		h.mu.Unlock()
-		s.sendError(&room, "incorrect or missing room key")
+		s.sendError(&room, "banned from room")
 		return
 	}
+	invited := r.hasValidInvite(idHex, h.nowUnix())
+	isOp := r.isOp(idHex, serverOp)
+	// +i invite-only.
+	if r.inviteOnly && !isOp && !invited {
+		h.mu.Unlock()
+		s.sendError(&room, "invite-only (+i)")
+		return
+	}
+	// +k keyed.
+	if r.key != "" && !isOp && !invited && r.key != key {
+		h.mu.Unlock()
+		s.sendError(&room, "bad key (+k)")
+		return
+	}
+	// Consume invite.
+	if invited {
+		delete(r.invited, idHex)
+		if r.registered {
+			h.persistRegistryLocked()
+		}
+	}
+
 	r.members[s] = struct{}{}
-	r.lastActivity = h.now()
-	members := r.memberHashesLocked()
+	h.touchRoom(r)
+	var members [][]byte
+	if h.cfg.IncludeJoinedMemberList {
+		members = r.memberHashesLocked()
+	}
 	recipients := roomLinksLocked(r)
+	registered := r.registered
+	modeStr := r.modeString()
+	topic := r.topic
 	h.mu.Unlock()
 
 	s.mu.Lock()
 	s.joined[room] = r
 	s.mu.Unlock()
 
-	h.log.Printf("%s joined #%s (%d members)", shortHash(id), room, len(members))
+	h.statInc(&h.stats.joins)
+	h.log.Printf("%s joined #%s (created=%v)", shortHash(id), room, created)
 	h.fanout(recipients, rrc.Joined(h.identityHash, h.now(), room, members))
+
+	// Room-info NOTICE to the joiner.
+	regWord := "unregistered"
+	if registered {
+		regWord = "registered"
+	}
+	topicWord := topic
+	if topicWord == "" {
+		topicWord = "(none)"
+	}
+	s.sendNotice(&room, "room "+room+": "+regWord+"; mode="+modeStr+"; topic="+topicWord)
 }
 
 // --- PART -------------------------------------------------------------
@@ -177,7 +347,7 @@ func (s *Session) handlePart(env *rrc.Envelope) {
 	h := s.hub
 	room := rrc.RoomName(env)
 	if room == "" {
-		s.sendError(nil, "PART requires a room name")
+		s.sendError(nil, "PART requires room name")
 		return
 	}
 
@@ -186,60 +356,112 @@ func (s *Session) handlePart(env *rrc.Envelope) {
 	delete(s.joined, room)
 	s.mu.Unlock()
 	if r == nil {
-		return // not in that room — nothing to do
+		return
 	}
 
 	h.mu.Lock()
 	delete(r.members, s)
-	r.lastActivity = h.now()
-	members := r.memberHashesLocked()
+	h.touchRoom(r)
+	var members [][]byte
+	if h.cfg.IncludeJoinedMemberList {
+		members = r.memberHashesLocked()
+	}
 	recipients := roomLinksLocked(r)
 	h.dropRoomIfEmptyLocked(r)
 	h.mu.Unlock()
 
+	h.statInc(&h.stats.parts)
 	h.log.Printf("%s parted #%s", shortHash(s.identity()), room)
 	parted := rrc.Parted(h.identityHash, h.now(), room, members)
 	h.fanout(recipients, parted)
-	s.send(parted) // confirm to the parter, who is no longer in recipients
+	s.send(parted) // confirm to the parter
 }
 
-// --- MSG --------------------------------------------------------------
+// --- MSG / NOTICE / ACTION --------------------------------------------
 
-func (s *Session) handleMsg(env *rrc.Envelope) {
+func (s *Session) handleMsg(env *rrc.Envelope, typ int) {
 	h := s.hub
-	if !s.isWelcomed() {
-		s.sendError(nil, "send HELLO before messaging")
-		return
-	}
 	id := s.identity()
-	if id == nil {
-		s.sendError(nil, "link is not identified — RRC requires LINKIDENTIFY")
-		return
-	}
 	room := rrc.RoomName(env)
-	text := rrc.BodyText(env)
-	if len(text) > h.cfg.Limits.MaxMsgBodyBytes {
-		s.sendError(&room, "message exceeds the hub body-size limit")
+
+	// Command dispatch — MSG and NOTICE only, never ACTION.
+	if typ != rrc.TAction {
+		if body, ok := env.Body.(string); ok {
+			if cmd := dispatchBody(body); cmd != "" {
+				s.handleCommand(cmd, body, room)
+				return
+			}
+		}
+	}
+
+	if typ == rrc.TMsg && room == "" {
+		s.sendError(nil, "message requires room name")
+		return
+	}
+	if typ == rrc.TNotice && room == "" {
+		return // NOTICE with no room is silently dropped
+	}
+	if typ == rrc.TAction && room == "" {
+		s.sendError(nil, "message requires room name")
 		return
 	}
 
-	s.mu.Lock()
-	r := s.joined[room]
-	nick := s.nick
-	overLimit := s.rateLimitedLocked()
-	s.mu.Unlock()
+	// MSG body-size limit (not NOTICE).
+	if typ == rrc.TMsg {
+		if text, ok := env.Body.(string); ok && h.limits.MaxMsgBodyBytes > 0 &&
+			len(text) > h.limits.MaxMsgBodyBytes {
+			s.sendError(&room, "message exceeds the hub body-size limit")
+			return
+		}
+	}
+
+	idHex := ""
+	if id != nil {
+		idHex = hex.EncodeToString(id)
+	}
+
+	h.mu.Lock()
+	r := h.roomLocked(room)
 	if r == nil {
-		s.sendError(&room, "join the room before messaging it")
+		h.mu.Unlock()
+		s.sendError(&room, "no such room")
 		return
 	}
-	if overLimit {
-		s.sendError(&room, "rate limit exceeded — slow down")
+	serverOp := h.isServerOp(id)
+	joined := r.hasMember(s)
+	// Room bans.
+	if _, banned := r.bans[idHex]; banned && idHex != "" {
+		h.mu.Unlock()
+		s.sendError(&room, "banned from room")
 		return
 	}
+	// +n no outside messages.
+	if r.noOutsideMsgs && !joined {
+		h.mu.Unlock()
+		s.sendError(&room, "no outside messages (+n)")
+		return
+	}
+	// +m moderated.
+	if r.moderated && !r.isVoiced(idHex, serverOp) {
+		h.mu.Unlock()
+		s.sendError(&room, "room is moderated (+m)")
+		return
+	}
+	h.touchRoom(r)
+	recipients := roomLinksLocked(r)
+	h.mu.Unlock()
 
-	// Rewrite K_SRC to the link-verified identity and stamp K_NICK; the
-	// client-supplied src/nick are advisory. K_ID / K_TS / K_ROOM /
-	// K_BODY pass through so clients can dedup the hub echo by msg id.
+	// Rewrite K_SRC to verified identity, stamp nick.
+	s.mu.Lock()
+	nick := s.nick
+	if envNick := rrc.NickName(env); envNick != "" {
+		if n, ok := normalizeNick(envNick, h.limits.MaxNickBytes); ok {
+			s.nick = n
+			nick = n
+		}
+	}
+	s.mu.Unlock()
+
 	env.Src = id
 	if nick != "" {
 		env.Nick = &nick
@@ -248,33 +470,45 @@ func (s *Session) handleMsg(env *rrc.Envelope) {
 	}
 	frame, err := env.Encode()
 	if err != nil {
-		h.log.Printf("rrc: re-encode of relayed MSG failed: %v", err)
+		h.log.Printf("rrc: re-encode of relayed message failed: %v", err)
 		return
 	}
-
-	h.mu.Lock()
-	r.lastActivity = h.now()
-	recipients := roomLinksLocked(r)
-	h.mu.Unlock()
-
 	for _, l := range recipients {
 		if e := l.Send(frame); e != nil {
 			h.log.Printf("rrc: fan-out send failed: %v", e)
 		}
+		h.statAdd(&h.stats.bytesOut, int64(len(frame)))
+	}
+	switch typ {
+	case rrc.TMsg:
+		h.statInc(&h.stats.msgsFwd)
+	case rrc.TNotice:
+		h.statInc(&h.stats.noticesFwd)
+	case rrc.TAction:
+		h.statInc(&h.stats.actionsFwd)
 	}
 }
 
-// --- PING -------------------------------------------------------------
+// --- PING / PONG ------------------------------------------------------
 
 func (s *Session) handlePing(env *rrc.Envelope) {
+	s.hub.statInc(&s.hub.stats.pingsIn)
+	s.hub.statInc(&s.hub.stats.pongsOut)
 	s.send(rrc.Pong(s.hub.identityHash, s.hub.now(), rrc.BodyBytes(env)))
+}
+
+func (s *Session) handlePong(env *rrc.Envelope) {
+	s.hub.statInc(&s.hub.stats.pongsIn)
+	s.mu.Lock()
+	s.pingAwaitMs = 0
+	s.mu.Unlock()
 }
 
 // --- lifecycle --------------------------------------------------------
 
-// Close tears the session down: it leaves every joined room (announcing
-// a PARTED to the remaining members), de-registers from the hub, and
-// closes the underlying link. Idempotent.
+// Close tears the session down: leaves every joined room, announces
+// PARTED to remaining members, de-registers, and closes the link.
+// Idempotent.
 func (s *Session) Close() {
 	h := s.hub
 	s.mu.Lock()
@@ -300,10 +534,14 @@ func (s *Session) Close() {
 	delete(h.sessions, s)
 	for _, r := range rooms {
 		delete(r.members, s)
-		r.lastActivity = h.now()
+		h.touchRoom(r)
+		var members [][]byte
+		if h.cfg.IncludeJoinedMemberList {
+			members = r.memberHashesLocked()
+		}
 		announce = append(announce, partedRoom{
 			recipients: roomLinksLocked(r),
-			env:        rrc.Parted(h.identityHash, h.now(), r.Name, r.memberHashesLocked()),
+			env:        rrc.Parted(h.identityHash, h.now(), r.Name, members),
 		})
 		h.dropRoomIfEmptyLocked(r)
 	}
@@ -320,28 +558,4 @@ func (s *Session) isWelcomed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.welcomed
-}
-
-// rateLimitedLocked prunes the recent-send window and reports whether
-// another MSG would exceed the hub's per-minute rate limit. On a false
-// return it records the send. Caller must hold s.mu.
-func (s *Session) rateLimitedLocked() bool {
-	limit := s.hub.cfg.Limits.RateLimitMsgsPerMin
-	if limit <= 0 {
-		return false
-	}
-	now := s.hub.now()
-	cutoff := now - 60_000
-	kept := s.msgTimes[:0]
-	for _, t := range s.msgTimes {
-		if t >= cutoff {
-			kept = append(kept, t)
-		}
-	}
-	s.msgTimes = kept
-	if len(s.msgTimes) >= limit {
-		return true
-	}
-	s.msgTimes = append(s.msgTimes, now)
-	return false
 }
