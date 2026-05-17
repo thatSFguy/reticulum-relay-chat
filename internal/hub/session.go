@@ -119,8 +119,12 @@ func (s *Session) OnInbound(frame []byte) {
 		return
 	}
 	h.mu.Lock()
+	hubClosed := h.closed
 	banned := h.isBanned(id)
 	h.mu.Unlock()
+	if hubClosed {
+		return // hub is shutting down — drop late frames (audit A9)
+	}
 	if banned {
 		s.sendError(nil, "banned")
 		s.Close()

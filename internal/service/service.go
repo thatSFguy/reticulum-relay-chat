@@ -86,6 +86,15 @@ type Service struct {
 	hub       *hub.Hub
 	destHash  []byte
 
+	// mu guards sessions and identities.
+	//
+	// LOCK ORDERING (audit A16): Service.mu is a LEAF relative to the
+	// hub's mutex — Session.identity() reaches back through rnsLink into
+	// Service.peerIdentity, which takes Service.mu, and that happens in
+	// several places while hub.mu is held. Therefore code holding
+	// Service.mu must NEVER call into the hub in a way that takes
+	// hub.mu. Acquire order is always hub.mu → Service.mu, never the
+	// reverse. Violating this reintroduces the sessionFor deadlock.
 	mu         sync.Mutex
 	sessions   map[string]*hub.Session // linkID hex -> session
 	identities map[string][]byte       // linkID hex -> verified peer identity hash
@@ -147,7 +156,11 @@ func (s *Service) Run(ctx context.Context) error {
 		s.log.Printf("attached tcp_client %s", iface.Address)
 	}
 
-	go s.transport.Run(ctx)
+	transportDone := make(chan struct{})
+	go func() {
+		s.transport.Run(ctx)
+		close(transportDone)
+	}()
 	go s.transport.RunLinkSweeper(ctx)
 	go s.announceLoop(ctx)
 	go s.janitor(ctx)
@@ -167,6 +180,10 @@ func (s *Service) Run(ctx context.Context) error {
 
 	<-ctx.Done()
 	s.log.Printf("shutdown: closing %d session(s)", s.hub.SessionCount())
+	// Wait for the transport dispatch goroutine to finish any in-flight
+	// inbound handler before persisting hub state, so a late handler
+	// cannot race hub.Stop()'s registry write (audit A9).
+	<-transportDone
 	// Persist the room registry and klines before exit.
 	s.hub.Stop()
 	return nil
