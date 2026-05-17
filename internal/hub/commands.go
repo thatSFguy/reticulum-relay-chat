@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/roomreg"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
@@ -76,6 +77,11 @@ func roomPtr(room string) *string {
 func (s *Session) validRoom(name string) error {
 	if name == "" {
 		return fmt.Errorf("empty room name")
+	}
+	// Reject invalid UTF-8 (audit A7): such a name would be persisted to
+	// rooms.toml and make the registry unloadable on the next restart.
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("room name must be valid UTF-8")
 	}
 	if m := s.hub.limits.MaxRoomNameBytes; m > 0 && len(name) > m {
 		return fmt.Errorf("room name exceeds the hub limit")
@@ -457,7 +463,7 @@ func (s *Session) cmdRegister(parts []string, room string) {
 	r.topicOpsOnly = true
 	r.ops[r.founder] = struct{}{}
 	h.touchRoom(r)
-	h.persistRegistryLocked()
+	h.markRegistryDirtyLocked()
 	h.mu.Unlock()
 
 	s.sendNotice(roomPtr(room), "registered room "+target)
@@ -495,7 +501,7 @@ func (s *Session) cmdUnregister(parts []string, room string) {
 		return
 	}
 	r.registered = false
-	h.persistRegistryLocked()
+	h.markRegistryDirtyLocked()
 	// Drop in-memory state if the room is now empty.
 	if len(r.members) == 0 {
 		delete(h.rooms, target)
@@ -542,6 +548,12 @@ func (s *Session) cmdTopic(parts []string, room string) {
 	}
 
 	newTopic := strings.Join(parts[2:], " ")
+	// A topic must be valid UTF-8 (audit A7) — it is persisted to
+	// rooms.toml for registered rooms.
+	if !utf8.ValidString(newTopic) {
+		s.sendError(roomPtr(target), "topic must be valid UTF-8")
+		return
+	}
 	h.mu.Lock()
 	r := h.roomLocked(target)
 	if r == nil {
@@ -558,7 +570,7 @@ func (s *Session) cmdTopic(parts []string, room string) {
 	r.topic = newTopic
 	h.touchRoom(r)
 	if r.registered {
-		h.persistRegistryLocked()
+		h.markRegistryDirtyLocked()
 	}
 	recipients := roomLinksLocked(r)
 	h.mu.Unlock()
@@ -643,7 +655,7 @@ func (s *Session) cmdOpVoice(cmd string, parts []string, room string) {
 	}
 	h.touchRoom(r)
 	if r.registered {
-		h.persistRegistryLocked()
+		h.markRegistryDirtyLocked()
 	}
 	h.mu.Unlock()
 
@@ -697,7 +709,7 @@ func (s *Session) cmdMode(parts []string, room string) {
 		}
 		h.touchRoom(r)
 		if r.registered {
-			h.persistRegistryLocked()
+			h.markRegistryDirtyLocked()
 		}
 		modeStr := r.modeString()
 		recipients := roomLinksLocked(r)
@@ -721,7 +733,7 @@ func (s *Session) cmdMode(parts []string, room string) {
 		r.key = key
 		h.touchRoom(r)
 		if r.registered {
-			h.persistRegistryLocked()
+			h.markRegistryDirtyLocked()
 		}
 		modeStr := r.modeString()
 		recipients := roomLinksLocked(r)
@@ -734,7 +746,7 @@ func (s *Session) cmdMode(parts []string, room string) {
 		r.key = ""
 		h.touchRoom(r)
 		if r.registered {
-			h.persistRegistryLocked()
+			h.markRegistryDirtyLocked()
 		}
 		modeStr := r.modeString()
 		recipients := roomLinksLocked(r)
@@ -800,7 +812,7 @@ func (s *Session) cmdMode(parts []string, room string) {
 		}
 		h.touchRoom(r)
 		if r.registered {
-			h.persistRegistryLocked()
+			h.markRegistryDirtyLocked()
 		}
 		recipients := roomLinksLocked(r)
 		short := hh
@@ -903,7 +915,7 @@ func (s *Session) cmdBan(parts []string, room string) {
 		r.bans[hh] = struct{}{}
 		h.touchRoom(r)
 		if r.registered {
-			h.persistRegistryLocked()
+			h.markRegistryDirtyLocked()
 		}
 		var victims []*Session
 		for m := range r.members {
@@ -936,7 +948,7 @@ func (s *Session) cmdBan(parts []string, room string) {
 	delete(r.bans, hh)
 	h.touchRoom(r)
 	if r.registered {
-		h.persistRegistryLocked()
+		h.markRegistryDirtyLocked()
 	}
 	h.mu.Unlock()
 	s.sendNotice(roomPtr(room), "ban removed in "+target)
@@ -1028,7 +1040,7 @@ func (s *Session) cmdInvite(parts []string, room string) {
 			r.invited[hh] = exp
 			expiresIn = int(ttl.Seconds())
 			if r.registered {
-				h.persistRegistryLocked()
+				h.markRegistryDirtyLocked()
 			}
 		}
 		h.mu.Unlock()
@@ -1070,7 +1082,7 @@ func (s *Session) cmdInvite(parts []string, room string) {
 	}
 	delete(r.invited, hh)
 	if r.registered {
-		h.persistRegistryLocked()
+		h.markRegistryDirtyLocked()
 	}
 	h.mu.Unlock()
 	s.sendNotice(roomPtr(room), "invite removed in "+target)

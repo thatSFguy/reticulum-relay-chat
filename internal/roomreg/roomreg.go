@@ -4,6 +4,7 @@
 package roomreg
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -102,6 +103,7 @@ func pruneInvited(invited map[string]float64, nowUnix float64) map[string]float6
 // dropped on load.
 func LoadRegistry(path string, nowUnix float64) (map[string]*RoomRecord, error) {
 	rooms := make(map[string]*RoomRecord)
+	sweepStaleTemp(filepath.Dir(path)) // clear crash-orphaned temp files (A18)
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -173,6 +175,8 @@ func SaveRegistry(path string, rooms map[string]*RoomRecord, nowUnix float64) er
 // LoadKlines reads the server-wide ban list from path. A missing file
 // yields a nil slice and no error. Returned hashes are lowercased hex.
 func LoadKlines(path string) ([]string, error) {
+	sweepStaleTemp(filepath.Dir(path)) // clear crash-orphaned temp files (A18)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -214,8 +218,23 @@ func SaveKlines(path string, hashes []string) error {
 // it writes to a temp file in the same directory, then renames over
 // the target. Parent directories are created if needed.
 func marshalAtomic(path string, v any) error {
+	// Encode into memory and re-parse it before touching disk (audit
+	// A7): never ship a registry/kline file the loader cannot read back
+	// — e.g. one carrying an invalid-UTF-8 room name or topic, which
+	// would otherwise silently wipe the registry on the next restart.
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(v); err != nil {
+		return fmt.Errorf("roomreg: encode: %w", err)
+	}
+	var check map[string]any
+	if err := toml.Unmarshal(buf.Bytes(), &check); err != nil {
+		return fmt.Errorf("roomreg: refusing to write unparseable output: %w", err)
+	}
+
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// The directory holds the room registry / kline list — keep it
+	// owner-only (audit A17).
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("roomreg: create dir: %w", err)
 	}
 
@@ -229,9 +248,9 @@ func marshalAtomic(path string, v any) error {
 		_ = os.Remove(tmpName)
 	}()
 
-	if err := toml.NewEncoder(tmp).Encode(v); err != nil {
+	if _, err := tmp.Write(buf.Bytes()); err != nil {
 		tmp.Close()
-		return fmt.Errorf("roomreg: encode: %w", err)
+		return fmt.Errorf("roomreg: write temp: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
@@ -244,5 +263,33 @@ func marshalAtomic(path string, v any) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("roomreg: rename: %w", err)
 	}
+	// fsync the parent directory so the rename itself is durable across
+	// a crash (audit A18).
+	fsyncDir(dir)
 	return nil
+}
+
+// fsyncDir flushes a directory entry so a rename into it survives a
+// crash (audit A18). Best-effort: some platforms (notably Windows) do
+// not support syncing a directory handle, so a failure here is ignored.
+func fsyncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	defer d.Close()
+	_ = d.Sync()
+}
+
+// sweepStaleTemp removes orphaned .roomreg-*.tmp files left behind by a
+// crash between CreateTemp and Rename (audit A18). Safe at load time,
+// before any new write begins.
+func sweepStaleTemp(dir string) {
+	matches, err := filepath.Glob(filepath.Join(dir, ".roomreg-*.tmp"))
+	if err != nil {
+		return
+	}
+	for _, m := range matches {
+		_ = os.Remove(m)
+	}
 }
