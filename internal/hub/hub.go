@@ -63,9 +63,10 @@ type Hub struct {
 	banned  map[string]struct{} // config-banned ∪ kline hashes (hex)
 	klines  map[string]struct{} // kline-only hashes (hex), for persistence
 
-	started bool
-	closed  bool // set by Stop; OnInbound drops frames once true (audit A9)
-	stats   stats
+	started       bool
+	closed        bool // set by Stop; OnInbound drops frames once true (audit A9)
+	registryDirty bool // pending rooms.toml write, flushed on a timer (audit A10)
+	stats         stats
 }
 
 // New builds a Hub. identityHash is the hub's 16-byte RNS identity hash —
@@ -249,10 +250,24 @@ func (h *Hub) sessionForHashLocked(idHex string) *Session {
 	return nil
 }
 
-// persistRegistryLocked saves the registered rooms to rooms.toml. Caller
-// must hold h.mu. A no-op when no registry path is configured.
-func (h *Hub) persistRegistryLocked() {
-	if h.cfg.RoomRegistryPath == "" {
+// markRegistryDirtyLocked flags the room registry for the next flush.
+// Caller must hold h.mu. The actual write is debounced onto a timer
+// (flushRegistry, driven by reaperLoop) plus a final flush at shutdown
+// (audit A10) — so a burst of mutations costs one disk write instead of
+// a full re-serialize + fsync per mutation under the global hub lock.
+func (h *Hub) markRegistryDirtyLocked() {
+	h.registryDirty = true
+}
+
+// flushRegistry writes the registered rooms to rooms.toml when the
+// registry has been marked dirty. The room snapshot is taken under
+// h.mu, but the TOML encode + fsync + atomic rename happen OUTSIDE the
+// lock (audit A10) so disk latency never stalls inbound processing.
+func (h *Hub) flushRegistry() {
+	h.mu.Lock()
+	if !h.registryDirty || h.cfg.RoomRegistryPath == "" {
+		h.registryDirty = false
+		h.mu.Unlock()
 		return
 	}
 	recs := make(map[string]*roomreg.RoomRecord)
@@ -261,8 +276,17 @@ func (h *Hub) persistRegistryLocked() {
 			recs[name] = r.toRecord()
 		}
 	}
-	if err := roomreg.SaveRegistry(h.cfg.RoomRegistryPath, recs, h.nowUnix()); err != nil {
+	path := h.cfg.RoomRegistryPath
+	nowUnix := h.nowUnix()
+	h.registryDirty = false
+	h.mu.Unlock()
+
+	if err := roomreg.SaveRegistry(path, recs, nowUnix); err != nil {
 		h.log.Printf("hub: save registry: %v", err)
+		// Re-mark dirty so the next flush retries the write.
+		h.mu.Lock()
+		h.registryDirty = true
+		h.mu.Unlock()
 	}
 }
 
@@ -306,7 +330,11 @@ func (h *Hub) Start(ctx context.Context) {
 func (h *Hub) Stop() {
 	h.mu.Lock()
 	h.closed = true
-	h.persistRegistryLocked()
+	h.mu.Unlock()
+	// Final flush of any pending registry mutations (audit A10), then
+	// persist the kline list.
+	h.flushRegistry()
+	h.mu.Lock()
 	h.persistKlinesLocked()
 	h.mu.Unlock()
 }
@@ -386,7 +414,7 @@ func (h *Hub) doPrune() {
 		}
 	}
 	if len(pruned) > 0 {
-		h.persistRegistryLocked()
+		h.markRegistryDirtyLocked()
 	}
 	h.mu.Unlock()
 	for _, name := range pruned {
@@ -405,6 +433,7 @@ func (h *Hub) reaperLoop(ctx context.Context) {
 		case <-t.C:
 			h.reapExpectations()
 			h.doIdleSweep()
+			h.flushRegistry()
 		}
 	}
 }

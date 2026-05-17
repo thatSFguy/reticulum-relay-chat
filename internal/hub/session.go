@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/hex"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
@@ -296,6 +297,12 @@ func (s *Session) handleJoin(env *rrc.Envelope) {
 		s.sendError(nil, "JOIN requires room name")
 		return
 	}
+	// A room name must be valid UTF-8 (audit A7): an invalid-UTF-8 name
+	// would later be written to rooms.toml and make the file unloadable.
+	if !utf8.ValidString(room) {
+		s.sendError(nil, "room name must be valid UTF-8")
+		return
+	}
 	if h.limits.MaxRoomNameBytes > 0 && len(room) > h.limits.MaxRoomNameBytes {
 		s.sendError(&room, "room name exceeds the hub limit")
 		return
@@ -360,7 +367,7 @@ func (s *Session) handleJoin(env *rrc.Envelope) {
 	if invited {
 		delete(r.invited, idHex)
 		if r.registered {
-			h.persistRegistryLocked()
+			h.markRegistryDirtyLocked()
 		}
 	}
 
