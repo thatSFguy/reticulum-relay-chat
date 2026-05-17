@@ -26,11 +26,43 @@ import (
 // name_hash = SHA-256("rrc.hub")[:10] = ac9fd3a81e4036f86e1d.
 const hubAspect = "rrc.hub"
 
-// identifyFrameLen is the decrypted length of a §6.6 LINKIDENTIFY
-// frame: link_id(16) || identity.public_key(64) || ed25519_signature(64).
-// The signature covers link_id || public_key, so the frame is
-// self-contained — no prior announce is needed to verify it.
-const identifyFrameLen = 16 + 64 + ed25519.SignatureSize
+// Decrypted lengths of a §6.6 LINKIDENTIFY frame. The signature covers
+// link_id || public_key in both forms.
+//
+//   - identifyLenUpstream (128): public_key(64) || signature(64) — the
+//     form upstream RNS link.identify() sends; every spec-compliant
+//     client (e.g. the Python RRC desktop client) uses this.
+//   - identifyLenLegacy (144): link_id(16) || public_key(64) ||
+//     signature(64) — a non-standard form older reticulum-mobile-app
+//     builds still send. Accepted until those clients ship the fix.
+const (
+	identifyLenUpstream = 64 + ed25519.SignatureSize
+	identifyLenLegacy   = 16 + 64 + ed25519.SignatureSize
+)
+
+// isIdentifyLen reports whether a decrypted link frame is a LINKIDENTIFY
+// by its length (either accepted form).
+func isIdentifyLen(n int) bool {
+	return n == identifyLenUpstream || n == identifyLenLegacy
+}
+
+// parseIdentifyFrame extracts the public key and signature from a
+// decrypted LINKIDENTIFY payload, accepting both the 128-byte upstream
+// form and the 144-byte legacy form. ok is false for any other length,
+// or for a legacy frame whose embedded link_id does not match linkID.
+func parseIdentifyFrame(linkID, plaintext []byte) (pubKey, sig []byte, ok bool) {
+	switch len(plaintext) {
+	case identifyLenUpstream:
+		return plaintext[0:64], plaintext[64:128], true
+	case identifyLenLegacy:
+		if !equalBytes(plaintext[0:16], linkID) {
+			return nil, nil, false
+		}
+		return plaintext[16:80], plaintext[80:144], true
+	default:
+		return nil, nil, false
+	}
+}
 
 // Service is the running RRC hub daemon.
 type Service struct {
@@ -169,14 +201,14 @@ func (s *Service) onPacket(p *rns.Packet) {
 
 // onLinkData is the LinkManager default handler: it receives every
 // decrypted inbound link-DATA payload tagged with its link_id. An RRC
-// CBOR envelope is routed to the link's hub session; an 80-byte frame is
-// treated as a §6.6 LINKIDENTIFY and used to bind the peer identity.
+// CBOR envelope is routed to the link's hub session; a LINKIDENTIFY
+// frame is used to bind the peer's verified identity.
 func (s *Service) onLinkData(linkID, plaintext []byte) {
 	if _, err := rrc.Decode(plaintext); err == nil {
 		s.sessionFor(linkID).OnInbound(plaintext)
 		return
 	}
-	if len(plaintext) == identifyFrameLen {
+	if isIdentifyLen(len(plaintext)) {
 		s.handleIdentify(linkID, plaintext)
 		return
 	}
@@ -197,21 +229,19 @@ func (s *Service) sessionFor(linkID []byte) *hub.Session {
 	return sess
 }
 
-// handleIdentify parses a §6.6 LINKIDENTIFY frame —
-// link_id(16) || public_key(64) || signature(64) — verifies the
-// Ed25519 signature over link_id || public_key, and binds the verified
-// identity hash (SHA-256(public_key)[:16]) to the link. The frame is
-// self-contained, so verification never depends on a prior announce.
+// handleIdentify parses a §6.6 LINKIDENTIFY frame (either accepted
+// form — see parseIdentifyFrame), verifies the Ed25519 signature over
+// link_id || public_key, and binds the verified identity hash
+// (SHA-256(public_key)[:16]) to the link. The public key is carried in
+// the frame, so verification never depends on a prior announce.
 func (s *Service) handleIdentify(linkID, plaintext []byte) {
-	embeddedLinkID := plaintext[0:16]
-	pubKey := plaintext[16:80]
-	sig := plaintext[80:144]
-
-	if !equalBytes(embeddedLinkID, linkID) {
-		s.log.Printf("link %x: LINKIDENTIFY link_id mismatch — dropped", linkID[:4])
+	pubKey, sig, ok := parseIdentifyFrame(linkID, plaintext)
+	if !ok {
+		s.log.Printf("link %x: malformed LINKIDENTIFY (%d bytes) — dropped",
+			linkID[:4], len(plaintext))
 		return
 	}
-	signed := make([]byte, 0, 16+64)
+	signed := make([]byte, 0, len(linkID)+len(pubKey))
 	signed = append(signed, linkID...)
 	signed = append(signed, pubKey...)
 	if !ed25519.Verify(ed25519.PublicKey(pubKey[32:]), signed, sig) {
