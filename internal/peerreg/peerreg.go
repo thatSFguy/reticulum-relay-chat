@@ -71,6 +71,8 @@ type Peer struct {
 	NotifyOptOut bool
 	// Mentions are notifications waiting for this peer to reappear.
 	Mentions []Mention
+	// NextSeq issues Mention.Seq values. In-memory only, like Seq.
+	NextSeq uint64 `toml:"-"`
 }
 
 // Mention is one pending "you were named" notification.
@@ -85,6 +87,17 @@ type Mention struct {
 	Text string
 	// TS is unix seconds when the mention happened, by the hub's clock.
 	TS float64
+
+	// Seq orders mentions within one peer's queue. In-memory only: it
+	// is assigned on append (and on load, in file order), never
+	// persisted, because it means nothing outside a single run.
+	//
+	// It exists because the queue evicts from the front when it is
+	// full, so a mention's index is not stable across the seconds an
+	// offline push spends in flight. Removing what was sent by index
+	// would discard whatever arrived meanwhile; removing it by Seq
+	// cannot.
+	Seq uint64 `toml:"-"`
 }
 
 // peerDTO is the on-disk shape of one peer.
@@ -151,12 +164,14 @@ func Load(path string) (map[string]*Peer, error) {
 			NotifyOptOut: p.NotifyOptOut,
 		}
 		for _, m := range p.Mentions {
+			peer.NextSeq++
 			peer.Mentions = append(peer.Mentions, Mention{
 				Room:   m.Room,
 				ByNick: m.ByNick,
 				ByHex:  m.ByHex,
 				Text:   m.Text,
 				TS:     m.TS,
+				Seq:    peer.NextSeq,
 			})
 		}
 		out[id] = peer

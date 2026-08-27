@@ -56,8 +56,12 @@ type pendingPush struct {
 	idHex  string
 	pubKey []byte
 	count  int
-	title  string
-	body   string
+	// highSeq is the Seq of the newest mention in this push. On success
+	// everything at or below it is dropped, which is exactly what was
+	// sent — see the removal in pushPendingMentions.
+	highSeq uint64
+	title   string
+	body    string
 }
 
 // pushPendingMentions hands each absent peer's waiting mentions to the
@@ -92,13 +96,15 @@ func (h *Hub) pushPendingMentions() {
 		h.lastPush[idHex] = now
 		title, body := renderMentionNotification(h.cfg.Name, p.Mentions)
 		batch = append(batch, pendingPush{
-			idHex:  idHex,
-			pubKey: append([]byte(nil), p.PublicKey...),
-			count:  len(p.Mentions),
-			title:  title,
-			body:   body,
+			idHex:   idHex,
+			pubKey:  append([]byte(nil), p.PublicKey...),
+			count:   len(p.Mentions),
+			highSeq: p.Mentions[len(p.Mentions)-1].Seq,
+			title:   title,
+			body:    body,
 		})
 	}
+	h.sweepLastPushLocked(now)
 	h.mu.Unlock()
 
 	for _, push := range batch {
@@ -112,19 +118,40 @@ func (h *Hub) pushPendingMentions() {
 		}
 		h.mu.Lock()
 		if p, ok := h.peers[push.idHex]; ok {
-			// Drop exactly what was sent. Anything appended while the
-			// upload was in flight is left for the next round rather
-			// than silently discarded.
-			if push.count >= len(p.Mentions) {
+			// Drop exactly what was sent, by sequence rather than by
+			// count. The queue evicts from the front when it is full,
+			// so if it was at its limit and more mentions arrived
+			// during the upload, the first push.count entries are no
+			// longer the ones that went out — trimming by index would
+			// throw away the new arrivals instead.
+			kept := p.Mentions[:0]
+			for _, m := range p.Mentions {
+				if m.Seq > push.highSeq {
+					kept = append(kept, m)
+				}
+			}
+			p.Mentions = kept
+			if len(p.Mentions) == 0 {
 				p.Mentions = nil
-			} else {
-				p.Mentions = p.Mentions[push.count:]
 			}
 			h.peersDirty = true
 		}
 		h.mu.Unlock()
 		h.log.Printf("mentions: delivered %d notification(s) to %s… over LXMF",
 			push.count, push.idHex[:8])
+	}
+}
+
+// sweepLastPushLocked forgets throttle entries that can no longer
+// suppress anything. Without it the map is the one piece of per-peer
+// state with no bound: MaxKnownPeers caps the directory and eviction
+// drops peers from it, but their throttle entries would stay forever.
+// Caller must hold h.mu.
+func (h *Hub) sweepLastPushLocked(now time.Time) {
+	for id, last := range h.lastPush {
+		if now.Sub(last) >= mentionPushInterval {
+			delete(h.lastPush, id)
+		}
 	}
 }
 

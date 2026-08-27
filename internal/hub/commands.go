@@ -1095,6 +1095,12 @@ func (s *Session) cmdInvite(parts []string, room string) {
 	s.sendNotice(roomPtr(room), "invite removed in "+target)
 }
 
+// historyPullIntervalMs is the minimum gap between one session's
+// /history requests. A join replay is small and self-limiting; a pull
+// is neither, so it gets its own throttle on top of the shared token
+// bucket.
+const historyPullIntervalMs = 15_000
+
 // cmdHistory serves a client more of a room's transcript than the join
 // replay carried, and lets a room operator purge it.
 //
@@ -1139,6 +1145,26 @@ func (s *Session) cmdHistory(parts []string, room string) {
 		if n < count {
 			count = n
 		}
+	}
+
+	// Throttle before reading anything. One inbound MSG costs the
+	// client a single token from a 240/min bucket and can make the hub
+	// emit HistoryPullCount messages / HistoryPullBytes of traffic —
+	// roughly a 16 KB answer to a 30-byte question. Every other bound
+	// in this feature caps one call; this one caps the rate, which is
+	// what matters on a hub whose clients may be a LoRa link away.
+	now := h.now()
+	s.mu.Lock()
+	last := s.lastHistoryPullMs
+	ready := last == 0 || now-last >= historyPullIntervalMs
+	if ready {
+		s.lastHistoryPullMs = now
+	}
+	s.mu.Unlock()
+	if !ready {
+		wait := (historyPullIntervalMs - (now - last) + 999) / 1000
+		s.sendNotice(roomPtr(room), fmt.Sprintf("history is rate limited; try again in %ds", wait))
+		return
 	}
 
 	// Membership is the authorization: joining already cleared the

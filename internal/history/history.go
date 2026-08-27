@@ -312,8 +312,9 @@ func (s *Store) roomsLocked() ([]string, error) {
 	return out, nil
 }
 
-// Drop deletes a room's entire transcript. Used when a room is
-// unregistered, or by an operator purge.
+// Drop deletes a room's entire transcript. Used when an ephemeral room
+// is recreated under a name a previous room used, or by an operator
+// purge.
 func (s *Store) Drop(room string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

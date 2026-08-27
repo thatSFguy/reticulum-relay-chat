@@ -115,10 +115,19 @@ func (h *Hub) resolveOneMentionLocked(tok string, r *Room) (idHex string, sess *
 				matches = append(matches, id)
 			}
 		}
-		if len(matches) != 1 {
-			return "", nil, false // unknown, or ambiguous
+		if len(matches) > 1 {
+			return "", nil, false // ambiguous: decline
 		}
-		return matches[0], h.sessionForHashLocked(matches[0]), true
+		if len(matches) == 1 {
+			return matches[0], h.sessionForHashLocked(matches[0]), true
+		}
+		// Hex-shaped but naming nobody. Nicknames are arbitrary UTF-8,
+		// so plenty of ordinary ones are also valid hex — "decade",
+		// "facade", "beaded". Returning here would make those people
+		// permanently unmentionable, and silently, since a mention that
+		// resolves to nobody says nothing. Fall through and try the
+		// token as the nickname it probably is; an actual prefix match
+		// has already won above, so this cannot override one.
 	}
 
 	// 2. A nickname in the room. resolveTargetLocked is the same
@@ -231,6 +240,8 @@ func (h *Hub) queueMentionLocked(idHex string, m peerreg.Mention) {
 	if !ok {
 		return
 	}
+	p.NextSeq++
+	m.Seq = p.NextSeq
 	p.Mentions = append(p.Mentions, m)
 	// Oldest-first eviction: a burst while someone is away must not grow
 	// the registry without bound, and the newest mentions are the ones

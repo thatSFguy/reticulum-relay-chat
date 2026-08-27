@@ -398,3 +398,37 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// One inbound MSG costs a client one token and can make the hub emit
+// HistoryPullBytes in reply, so /history carries its own throttle on
+// top of the shared bucket.
+func TestHistoryPullIsThrottled(t *testing.T) {
+	h := historyHub(t, nil)
+	idA := bytes.Repeat([]byte{0xA1}, 16)
+	idB := bytes.Repeat([]byte{0xB2}, 16)
+
+	sa, _ := connect(t, h, idA)
+	join(t, sa, idA, "#lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
+	say(t, sa, idA, "#lobby", "something worth pulling")
+
+	sb, linkB := connect(t, h, idB)
+	join(t, sb, idB, "#lobby", "")
+
+	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "#lobby", "/history #lobby 10")))
+	before := len(replayedBodies(t, linkB))
+	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "#lobby", "/history #lobby 10")))
+
+	if got := len(replayedBodies(t, linkB)); got != before {
+		t.Errorf("the second /history replayed %d more message(s), want it throttled", got-before)
+	}
+	var throttled bool
+	for _, n := range noticesOn(t, linkB) {
+		if strings.Contains(n, "rate limited") {
+			throttled = true
+		}
+	}
+	if !throttled {
+		t.Error("no rate-limit notice; the client was given no reason for the silence")
+	}
+}

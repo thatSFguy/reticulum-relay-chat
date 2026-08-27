@@ -445,3 +445,26 @@ func hasSubstringIn(list []string, want string) bool {
 	}
 	return false
 }
+
+// Plenty of ordinary nicknames are also valid hex. Treating a token as
+// a hash prefix and giving up when it matches no identity would make
+// those people silently unmentionable — no error, just nothing.
+func TestAHexShapedNickIsStillMentionable(t *testing.T) {
+	h := mentionHub(t, nil)
+	for _, nick := range []string{"decade", "facade", "beaded"} {
+		t.Run(nick, func(t *testing.T) {
+			seed := byte(0xC0 + len(nick) + int(nick[0]))
+			_, id := keyFor(seed)
+			visitAndLeave(t, h, seed, nick)
+
+			sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
+			join(t, sa, idA, "#lobby", "")
+			say(t, sa, idA, "#lobby", "@"+nick+" are you there")
+			sa.Close()
+
+			if got := len(pendingFor(h, id)); got != 1 {
+				t.Fatalf("%d mentions queued for @%s, want 1", got, nick)
+			}
+		})
+	}
+}

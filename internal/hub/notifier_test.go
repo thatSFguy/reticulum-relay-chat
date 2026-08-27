@@ -296,3 +296,41 @@ func equalBytesHelper(a, b []byte) bool {
 	}
 	return true
 }
+
+// The queue evicts from the front when it is full, so index arithmetic
+// on it is only safe while nothing has been evicted. This is the case
+// where something has: a full queue, an upload in flight, and more
+// mentions arriving before it returns. Trimming by count discards the
+// new arrivals along with the sent ones.
+func TestAFullQueueDoesNotLoseMentionsArrivingDuringAPush(t *testing.T) {
+	h := mentionHub(t, func(c *config.HubConfig) { c.MaxPendingMentions = 3 })
+	var sa *Session
+	var idA []byte
+	n := &notifierHook{onNotify: func() {
+		// Overflows the queue: "one" is evicted to make room, so the
+		// three that were sent are no longer at the front.
+		say(t, sa, idA, "#lobby", "@bob four")
+	}}
+	h.SetOfflineNotifier(n)
+
+	_, id := keyFor(0xB2)
+	visitAndLeave(t, h, 0xB2, "bob")
+	sa, _, idA = connectKeyed(t, h, 0xA1, "alice")
+	join(t, sa, idA, "#lobby", "")
+	for _, word := range []string{"one", "two", "three"} {
+		say(t, sa, idA, "#lobby", "@bob "+word)
+	}
+	if got := len(pendingFor(h, id)); got != 3 {
+		t.Fatalf("setup: %d mentions queued, want the queue full at 3", got)
+	}
+
+	h.pushPendingMentions()
+
+	held := pendingFor(h, id)
+	if len(held) != 1 {
+		t.Fatalf("%d mentions queued, want only the one that arrived mid-push", len(held))
+	}
+	if !strings.Contains(held[0].Text, "four") {
+		t.Errorf("surviving mention is %q, want the one that arrived during the push", held[0].Text)
+	}
+}

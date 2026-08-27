@@ -26,6 +26,8 @@ type Session struct {
 
 	pingAwaitMs int64 // 0 = not awaiting a PONG
 
+	lastHistoryPullMs int64 // 0 = never; throttles /history (see cmdHistory)
+
 	expectations []*resourceExpectation
 }
 

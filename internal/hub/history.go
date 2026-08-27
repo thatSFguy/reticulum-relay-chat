@@ -64,11 +64,17 @@ func (h *Hub) recordMessage(room string, env *rrc.Envelope) {
 	}
 }
 
-// dropHistory discards a room's transcript. Used when an unregistered
-// room is (re)created, so an ephemeral room's conversation does not
-// outlive it — RRC's own semantics are that such a room dies with its
-// last member, and history must not quietly resurrect it for whoever
-// creates a room of the same name next.
+// dropHistory discards a room's transcript. Called when an unregistered
+// room is created, so an ephemeral room's conversation does not outlive
+// it — RRC's own semantics are that such a room dies with its last
+// member, and history must not quietly resurrect it for whoever creates
+// a room of the same name next — and by /history purge.
+//
+// Note that /unregister does not call this: the room stays live and
+// keeps its transcript, which is only dropped once the room has died
+// and someone recreates it. Nobody gains read access that way (a replay
+// still requires membership), but an operator expecting unregister to
+// erase should use /history purge.
 func (h *Hub) dropHistory(room string) {
 	if !h.historyEnabled() {
 		return
