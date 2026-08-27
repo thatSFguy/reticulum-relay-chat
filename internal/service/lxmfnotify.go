@@ -167,6 +167,35 @@ func (n *lxmfNotifier) selectNode() ([]byte, error) {
 	return best, nil
 }
 
+// ensureAddressable makes sure the transport can encrypt to known's
+// destination, without discarding anything better it already holds.
+//
+// Restore overwrites a cache entry wholesale, and the entry synthesized
+// from a LINKIDENTIFY key carries a public key and nothing else — no
+// app_data, no hop count, no last-seen. app_data is the part that
+// matters: it carries the recipient's §5.7.4 stamp_cost, and
+// SendPropagated grinds a delivery stamp only when it can read one.
+// Overwriting a real announce with the stub drops that cost to zero and
+// sends an unstamped message, which a recipient enforcing stamps
+// discards silently — the hub logs a successful upload and nothing ever
+// arrives.
+//
+// A live announce therefore always wins. It is strictly richer, and it
+// is the same key: Restore re-derives the destination from the public
+// key before accepting an entry, so a different key could not have been
+// cached under this destination in the first place. The synthesized
+// entry fills in only for a peer the hub has never heard announce,
+// which is exactly the case this path exists for.
+func ensureAddressable(t *rns.Transport, known *rns.KnownIdentity) {
+	if t == nil || known == nil {
+		return
+	}
+	if t.Recall(known.DestHash) != nil {
+		return
+	}
+	t.Restore(known)
+}
+
 // NotifyAbsent uploads one notification for the peer owning pubKey to a
 // propagation node, where it waits for that peer's client to sync.
 func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
@@ -174,12 +203,26 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 	if err != nil {
 		return err
 	}
-	// Teach the transport how to encrypt to this peer. Restore
-	// re-derives the destination from the key before accepting it, so
-	// this is the same admission check a live announce would face — we
-	// are supplying knowledge the hub already proved, not asserting a
-	// pairing.
-	n.svc.transport.Restore(known)
+	// Teach the transport how to encrypt to this peer, but only if it
+	// does not already know it. Restore overwrites a cache entry
+	// wholesale, and the entry we synthesize here carries a public key
+	// and nothing else — no app_data, no hop count, no last-seen.
+	//
+	// app_data is the part that matters. It carries the recipient's
+	// §5.7.4 stamp_cost, and SendPropagated grinds a delivery stamp
+	// only when it can read one. Clobbering a real announce with this
+	// stub therefore drops the cost to zero and sends an unstamped
+	// message, which a recipient that enforces stamps discards without
+	// a word — the hub logs a successful upload and the notification
+	// never arrives.
+	//
+	// So a live announce always wins: it is strictly richer, and it is
+	// the same key (Restore re-derives the destination from the public
+	// key before accepting it, so a mismatch could not have been
+	// cached under this destination anyway). We fill in only for a
+	// peer the hub has never heard announce, which is precisely the
+	// case this whole path exists for.
+	ensureAddressable(n.svc.transport, known)
 
 	node, err := n.selectNode()
 	if err != nil {
