@@ -120,7 +120,43 @@ resource too large: <n> > <max>
   hub forwards a fully-received `notice`-kind payload to the room as a
   `NOTICE`.
 
-## 7. Wire constants (reference — unchanged)
+## 7. Room history — nothing to implement
+
+The hub can retain a bounded, expiring transcript per room
+(`history_enabled`) and replay recent messages to a joining client.
+**A client needs no changes for this**, which is the point: the deployed
+clients cannot be updated, so the feature is built entirely out of what
+they already handle.
+
+What a client sees when it joins a room with history:
+
+1. `JOINED`, then the room-info `NOTICE`, exactly as before.
+2. A `NOTICE` reading `--- N message(s) from earlier ---`.
+3. N ordinary `MSG` / `ACTION` envelopes.
+4. A `NOTICE` reading `--- end of history ---`.
+
+The replayed envelopes are the originals: same `K_ID`, same `K_TS`, same
+`K_SRC`, same `K_NICK`. That has two consequences worth knowing:
+
+- A client that remembers message ids can recognise a replayed message
+  it already rendered and skip it. One that does not will simply render
+  it again, which is correct behavior for a client seeing it for the
+  first time.
+- `K_TS` is the time the message was **sent**, not the time it was
+  replayed, so a client that sorts or displays by timestamp shows the
+  conversation in its original order without doing anything special.
+
+A client that wants to do better than the default can match the two
+bracket NOTICEs to collapse the block, grey it out, or suppress
+notification sounds for it — but none of that is required, and the
+brackets are plain text either way.
+
+`/history [room] [count]` asks for more than the join replay carried,
+and `/history purge <room>` (room operators) drops a transcript. Both
+are ordinary slash commands — a `MSG` whose body starts with `/` — so
+any client that can send text already supports them.
+
+## 8. Wire constants (reference — unchanged)
 
 - Envelope keys: `KV`=0 (version, must be 1), `KT`=1 (type), `KID`=2
   (8 random bytes), `KTS`=3 (ms since epoch), `KSrc`=4 (16-byte identity

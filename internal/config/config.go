@@ -61,6 +61,26 @@ type HubConfig struct {
 	MaxPendingResourceExpectations int      `toml:"max_pending_resource_expectations"`
 	ResourceExpectationTTL         Duration `toml:"resource_expectation_ttl"`
 
+	// History — the retained room transcript and the replay a joining
+	// client gets. Off by default: turning it on means the hub starts
+	// keeping plaintext conversation on disk, which is an operator's
+	// decision to make, not one an upgrade should make for them.
+	HistoryEnabled         bool     `toml:"history_enabled"`
+	HistoryPath            string   `toml:"history_path"`
+	HistoryRetention       Duration `toml:"history_retention"`
+	HistoryMaxBytesPerRoom int64    `toml:"history_max_bytes_per_room"`
+	HistoryMaxTotalBytes   int64    `toml:"history_max_total_bytes"`
+	// HistoryReplayCount / HistoryReplayBytes bound the automatic replay
+	// sent on JOIN. They are deliberately small: a client may be on a
+	// LoRa link where a week of backlog is minutes of airtime, so the
+	// join replay is a taste of the conversation and /history is how a
+	// client asks for more.
+	HistoryReplayCount int `toml:"history_replay_count"`
+	HistoryReplayBytes int `toml:"history_replay_bytes"`
+	// HistoryPullCount / HistoryPullBytes bound one /history request.
+	HistoryPullCount int `toml:"history_pull_count"`
+	HistoryPullBytes int `toml:"history_pull_bytes"`
+
 	Limits LimitsConfig `toml:"limits"`
 }
 
@@ -125,6 +145,15 @@ func defaults() Config {
 			MaxResourceBytes:               262144,
 			MaxPendingResourceExpectations: 8,
 			ResourceExpectationTTL:         Duration{30 * time.Second},
+			HistoryEnabled:                 false,
+			HistoryPath:                    "history",
+			HistoryRetention:               Duration{7 * 24 * time.Hour},
+			HistoryMaxBytesPerRoom:         4 * 1024 * 1024,
+			HistoryMaxTotalBytes:           128 * 1024 * 1024,
+			HistoryReplayCount:             10,
+			HistoryReplayBytes:             2048,
+			HistoryPullCount:               100,
+			HistoryPullBytes:               16384,
 			Limits: LimitsConfig{
 				MaxNickBytes:        32,
 				MaxRoomNameBytes:    64,
@@ -143,6 +172,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	applyLimitDefaults(&c.Hub.Limits)
+	applyHistoryDefaults(&c.Hub)
 	if c.Hub.MaxResourceBytes <= 0 {
 		c.Hub.MaxResourceBytes = 262144
 	}
@@ -164,6 +194,39 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	return &c, nil
+}
+
+// applyHistoryDefaults fills in any history knob an operator left unset.
+// A hub that enables history without tuning it must still get bounded,
+// sane behavior rather than an unbounded store or an empty replay.
+func applyHistoryDefaults(h *HubConfig) {
+	d := defaults().Hub
+	if h.HistoryPath == "" {
+		h.HistoryPath = d.HistoryPath
+	}
+	if h.HistoryRetention.Duration <= 0 {
+		h.HistoryRetention = d.HistoryRetention
+	}
+	if h.HistoryMaxBytesPerRoom <= 0 {
+		h.HistoryMaxBytesPerRoom = d.HistoryMaxBytesPerRoom
+	}
+	if h.HistoryMaxTotalBytes <= 0 {
+		h.HistoryMaxTotalBytes = d.HistoryMaxTotalBytes
+	}
+	if h.HistoryReplayCount < 0 {
+		h.HistoryReplayCount = 0
+	} else if h.HistoryReplayCount == 0 {
+		h.HistoryReplayCount = d.HistoryReplayCount
+	}
+	if h.HistoryReplayBytes <= 0 {
+		h.HistoryReplayBytes = d.HistoryReplayBytes
+	}
+	if h.HistoryPullCount <= 0 {
+		h.HistoryPullCount = d.HistoryPullCount
+	}
+	if h.HistoryPullBytes <= 0 {
+		h.HistoryPullBytes = d.HistoryPullBytes
+	}
 }
 
 func applyLimitDefaults(l *LimitsConfig) {

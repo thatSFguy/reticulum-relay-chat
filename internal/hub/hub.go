@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
+	"github.com/thatSFguy/reticulum-relay-chat/internal/history"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/roomreg"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
@@ -64,6 +65,11 @@ type Hub struct {
 	rooms    map[string]*Room
 	sessions map[*Session]struct{}
 
+	// history retains room transcripts for the join replay and /history.
+	// nil when the operator has not enabled it, which every call site
+	// treats as "no history" rather than an error.
+	history *history.Store
+
 	trusted map[string]struct{} // server-op identity hashes (hex)
 	banned  map[string]struct{} // config-banned ∪ kline hashes (hex)
 	klines  map[string]struct{} // kline-only hashes (hex), for persistence
@@ -106,7 +112,31 @@ func New(identityHash []byte, cfg config.HubConfig, logger *log.Logger) *Hub {
 	h.reloadTrust()
 	h.loadKlines()
 	h.loadRegistry()
+	h.openHistory()
 	return h
+}
+
+// openHistory attaches the transcript store when the operator enabled
+// it. A store that will not open is logged and left nil: a hub that
+// cannot write history is still a working hub, and refusing to start
+// would take a room down over a feature that is meant to be optional.
+func (h *Hub) openHistory() {
+	if !h.cfg.HistoryEnabled {
+		return
+	}
+	st, err := history.Open(h.cfg.HistoryPath, history.Options{
+		Retention:       h.cfg.HistoryRetention.Duration,
+		MaxBytesPerRoom: h.cfg.HistoryMaxBytesPerRoom,
+		MaxTotalBytes:   h.cfg.HistoryMaxTotalBytes,
+		MaxRecordBytes:  h.cfg.Limits.MaxMsgBodyBytes + 512, // body plus record framing
+	})
+	if err != nil {
+		h.log.Printf("history: disabled — %v", err)
+		return
+	}
+	h.history = st
+	h.log.Printf("history: retaining %s of room transcript in %s",
+		h.cfg.HistoryRetention.Duration, h.cfg.HistoryPath)
 }
 
 // reloadTrust rebuilds the trusted/banned sets from config. The kline set
@@ -425,6 +455,7 @@ func (h *Hub) doPrune() {
 	for _, name := range pruned {
 		h.log.Printf("hub: pruned stale registered room #%s", name)
 	}
+	h.pruneHistory()
 }
 
 // reaperLoop drops expired pending resource expectations.

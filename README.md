@@ -28,8 +28,17 @@ This hub targets feature parity with the reference Python hub `rrcd`.
 - **Room modes** — `+m` moderated, `+i` invite-only, `+k` keyed, `+p`
   private, `+t` topic-locked, `+n` no-outside-messages, `+r` registered,
   plus per-user `+o`/`+v` (op/voice).
+- **Room history (optional)** — with `history_enabled`, the hub keeps a
+  bounded, expiring transcript per room (seven days by default) and
+  replays the last few messages to a joining client, so a room reads as
+  a conversation in progress rather than an empty screen. `/history`
+  asks for more; `/history purge <room>` drops it. Replayed messages are
+  the original envelopes — same id, same timestamp — bracketed by
+  ordinary NOTICEs, so **no client change is required**. Off by default:
+  retaining plaintext conversation on disk is the operator's call.
 - **Slash commands** — `/list`, `/who`, `/topic`, `/mode`, `/kick`,
-  `/op`/`/deop`/`/voice`/`/devoice`, `/ban`, `/invite`, `/register`/
+  `/op`/`/deop`/`/voice`/`/devoice`, `/ban`, `/invite`, `/history`,
+  `/register`/
   `/unregister`, and the operator commands `/stats`, `/reload`, `/kline`.
 - **Operator / trust model** — `trusted_identities` server operators,
   server-wide klines, room founders, and per-room bans/invites.

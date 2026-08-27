@@ -91,6 +91,44 @@ max_pending_resource_expectations = 8
 # reaper drops it. (default "30s")
 resource_expectation_ttl = "30s"
 
+# --- room history -----------------------------------------------------
+#
+# Off by default. Turning it on means the hub keeps plaintext room
+# conversation on disk for the retention window, which is an operator's
+# decision — the hub already sees every message in order to relay it,
+# but keeping it is a different promise to your users than relaying it.
+#
+# When enabled, a client joining a room is replayed the last few
+# messages so it lands in a conversation rather than an empty screen,
+# and /history asks for more. Nothing about this needs a client change:
+# a replay is ordinary MSG traffic bracketed by NOTICEs, and /history is
+# an ordinary slash command.
+history_enabled = false
+
+# Where transcripts live. One directory per room, one append-only file
+# per room per UTC day. (default "history")
+history_path = "history"
+
+# How long a message stays replayable. (default "168h" — seven days)
+history_retention = "168h"
+
+# Storage bounds. Whichever binds first evicts oldest-day-first; the
+# current day is never evicted, so a busy room loses its past rather
+# than the conversation in progress.
+history_max_bytes_per_room = 4194304     # (default 4 MiB)
+history_max_total_bytes = 134217728      # (default 128 MiB)
+
+# What a client is replayed automatically when it joins. Keep these
+# small: a client may be on a LoRa link where a week of backlog is
+# minutes of airtime. This is a taste of the conversation, not an
+# archive — /history is how a client asks for the rest.
+history_replay_count = 10                # (default 10; 0 disables the join replay)
+history_replay_bytes = 2048              # (default 2048)
+
+# Bounds on one /history request.
+history_pull_count = 100                 # (default 100)
+history_pull_bytes = 16384               # (default 16384)
+
 [hub.limits]
 # Client-facing limits advertised in WELCOME and enforced hub-side.
 max_nick_bytes = 32                  # (default 32)

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/thatSFguy/reticulum-relay-chat/internal/history"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
 
@@ -405,6 +406,24 @@ func (s *Session) handleJoin(env *rrc.Envelope) {
 		topicWord = "(none)"
 	}
 	s.sendNotice(&room, "room "+room+": "+regWord+"; mode="+modeStr+"; topic="+topicWord)
+
+	// A freshly created unregistered room starts empty: its name may
+	// have been used before by a room that has since died, and RRC's
+	// contract is that such a room took its conversation with it.
+	if created && !registered {
+		h.dropHistory(room)
+		return
+	}
+	// Otherwise catch the joiner up. Deliberately a small taste of the
+	// conversation rather than the whole window — the client may be on a
+	// link where a week of backlog is minutes of airtime — and /history
+	// is there for anyone who wants more.
+	if h.cfg.HistoryReplayCount > 0 {
+		s.replayTo(room, history.Query{
+			Limit:    h.cfg.HistoryReplayCount,
+			MaxBytes: h.cfg.HistoryReplayBytes,
+		})
+	}
 }
 
 // --- PART -------------------------------------------------------------
@@ -553,6 +572,9 @@ func (s *Session) handleMsg(env *rrc.Envelope, typ int) {
 	case rrc.TAction:
 		h.statInc(&h.stats.actionsFwd)
 	}
+	// Retain what the room actually saw — env carries the rewritten
+	// K_SRC and the normalized nick from just above.
+	h.recordMessage(room, env)
 }
 
 // --- PING / PONG ------------------------------------------------------

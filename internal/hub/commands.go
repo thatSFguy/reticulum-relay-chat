@@ -4,9 +4,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
+	"github.com/thatSFguy/reticulum-relay-chat/internal/history"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/roomreg"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
@@ -59,6 +62,8 @@ func (s *Session) handleCommand(trimmed, _, room string) {
 		s.cmdBan(parts, room)
 	case "invite":
 		s.cmdInvite(parts, room)
+	case "history":
+		s.cmdHistory(parts, room)
 	default:
 		s.sendError(roomPtr(room), "unrecognized command")
 	}
@@ -1086,4 +1091,101 @@ func (s *Session) cmdInvite(parts []string, room string) {
 	}
 	h.mu.Unlock()
 	s.sendNotice(roomPtr(room), "invite removed in "+target)
+}
+
+// cmdHistory serves a client more of a room's transcript than the join
+// replay carried, and lets a room operator purge it.
+//
+//	/history [room] [count]
+//	/history purge <room>
+//
+// It needs nothing from the client but the ability to send text, which
+// is the point: a slash command is an ordinary MSG body, so every
+// deployed RRC client already supports this without being changed.
+func (s *Session) cmdHistory(parts []string, room string) {
+	h := s.hub
+	if !h.historyEnabled() {
+		s.sendNotice(roomPtr(room), "this hub does not retain history")
+		return
+	}
+
+	if len(parts) >= 2 && strings.EqualFold(parts[1], "purge") {
+		s.historyPurge(parts, room)
+		return
+	}
+
+	target := room
+	if len(parts) >= 2 {
+		target = parts[1]
+	}
+	if target == "" {
+		s.sendNotice(nil, "usage: /history [room] [count]")
+		return
+	}
+	if err := s.validRoom(target); err != nil {
+		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
+		return
+	}
+
+	count := h.cfg.HistoryPullCount
+	if len(parts) >= 3 {
+		n, err := strconv.Atoi(parts[2])
+		if err != nil || n <= 0 {
+			s.sendNotice(roomPtr(room), "usage: /history [room] [count]")
+			return
+		}
+		if n < count {
+			count = n
+		}
+	}
+
+	// Membership is the authorization: joining already cleared the
+	// room's key, invite and ban checks, so "you may read what was said
+	// here" reduces to "you are in here". Re-deriving those checks
+	// against a transcript would be a second, divergent copy of the
+	// join gate.
+	h.mu.Lock()
+	r := h.roomLocked(target)
+	member := r != nil && r.hasMember(s)
+	h.mu.Unlock()
+	if !member {
+		s.sendError(roomPtr(target), "join the room to read its history")
+		return
+	}
+
+	if n := s.replayTo(target, history.Query{
+		Limit:    count,
+		MaxBytes: h.cfg.HistoryPullBytes,
+		Since:    time.Now().Add(-h.cfg.HistoryRetention.Duration),
+	}); n == 0 {
+		s.sendNotice(roomPtr(target), "no history for "+target)
+	}
+}
+
+// historyPurge drops a room's transcript on an operator's say-so.
+func (s *Session) historyPurge(parts []string, room string) {
+	h := s.hub
+	if len(parts) < 3 {
+		s.sendNotice(roomPtr(room), "usage: /history purge <room>")
+		return
+	}
+	target := parts[2]
+	if err := s.validRoom(target); err != nil {
+		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
+		return
+	}
+
+	h.mu.Lock()
+	serverOp := h.isServerOp(s.identity())
+	r := h.roomLocked(target)
+	authorized := r != nil && r.isOp(s.identityHex(), serverOp)
+	h.mu.Unlock()
+	if !authorized {
+		s.sendError(roomPtr(target), "not authorized")
+		return
+	}
+
+	h.dropHistory(target)
+	h.log.Printf("%s purged the history of #%s", shortHash(s.identity()), target)
+	s.sendNotice(roomPtr(target), "history for "+target+" purged")
 }
