@@ -29,6 +29,11 @@ type Link interface {
 	// PeerIdentityHash returns the client's 16-byte verified RNS identity
 	// hash, or nil if the client has not identified yet.
 	PeerIdentityHash() []byte
+	// PeerPublicKey returns the client's 64-byte verified RNS public key
+	// (X25519 public || Ed25519 public), or nil if the client has not
+	// identified yet. The hash above identifies a peer; only the key can
+	// address one once its link is gone — see internal/lxmfaddr.
+	PeerPublicKey() []byte
 	// SendResource delivers a large payload to the client as an RNS
 	// Resource (the hub has already sent the matching RESOURCE_ENVELOPE).
 	// Returns an error when resource transfer is unavailable — the hub

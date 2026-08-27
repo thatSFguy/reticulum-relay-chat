@@ -97,7 +97,19 @@ type Service struct {
 	// reverse. Violating this reintroduces the sessionFor deadlock.
 	mu         sync.Mutex
 	sessions   map[string]*hub.Session // linkID hex -> session
-	identities map[string][]byte       // linkID hex -> verified peer identity hash
+	identities map[string]peerBinding  // linkID hex -> what LINKIDENTIFY proved
+}
+
+// peerBinding is what a verified §6.6 LINKIDENTIFY establishes about the
+// remote end of a link.
+//
+// The public key is retained, not just the hash it reduces to: the hash
+// identifies a peer but cannot address one, while the key yields the
+// peer's LXMF delivery destination (see internal/lxmfaddr) — the only
+// way this hub can reach someone whose link has since gone away.
+type peerBinding struct {
+	hash   []byte // SHA-256(public_key)[:16] — the envelope K_SRC value
+	pubKey []byte // 64 bytes: X25519 public || Ed25519 public
 }
 
 // New builds the service: loads (or creates) the hub identity, wires the
@@ -114,7 +126,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 		transport:  rns.NewTransport(logger),
 		destHash:   id.DestinationHashFor(hubAspect),
 		sessions:   make(map[string]*hub.Session),
-		identities: make(map[string][]byte),
+		identities: make(map[string]peerBinding),
 	}
 	svc.hub = hub.New(id.Hash(), cfg.Hub, logger)
 
@@ -321,7 +333,10 @@ func (s *Service) handleIdentify(linkID, plaintext []byte) {
 	h := sha256.Sum256(pubKey)
 	idHash := append([]byte(nil), h[:16]...)
 	s.mu.Lock()
-	s.identities[hex.EncodeToString(linkID)] = idHash
+	s.identities[hex.EncodeToString(linkID)] = peerBinding{
+		hash:   idHash,
+		pubKey: append([]byte(nil), pubKey...),
+	}
 	s.mu.Unlock()
 	s.log.Printf("link %x identified as %s (verified)", linkID[:4], hex.EncodeToString(idHash))
 }
@@ -329,7 +344,15 @@ func (s *Service) handleIdentify(linkID, plaintext []byte) {
 func (s *Service) peerIdentity(linkID []byte) []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.identities[hex.EncodeToString(linkID)]
+	return s.identities[hex.EncodeToString(linkID)].hash
+}
+
+// peerPublicKey returns the 64-byte public key the link's peer proved
+// over LINKIDENTIFY, or nil if it has not identified.
+func (s *Service) peerPublicKey(linkID []byte) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.identities[hex.EncodeToString(linkID)].pubKey
 }
 
 // sendOnLink encrypts an RRC frame under a link's session keys and
@@ -409,6 +432,8 @@ func (l *rnsLink) Close() {
 }
 
 func (l *rnsLink) PeerIdentityHash() []byte { return l.svc.peerIdentity(l.linkID) }
+
+func (l *rnsLink) PeerPublicKey() []byte { return l.svc.peerPublicKey(l.linkID) }
 
 // SendResource delivers payload to the client as an RNS Resource over
 // this link (SPEC §10). The hub has already sent the matching

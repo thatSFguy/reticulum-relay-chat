@@ -68,6 +68,10 @@ func (h *Hub) NewSession(link Link) *Session {
 
 func (s *Session) identity() []byte { return s.link.PeerIdentityHash() }
 
+// PeerPublicKey returns the 64-byte public key this session's client
+// proved when it identified, or nil if it has not identified yet.
+func (s *Session) PeerPublicKey() []byte { return s.link.PeerPublicKey() }
+
 func (s *Session) identityHex() string {
 	if id := s.identity(); id != nil {
 		return hex.EncodeToString(id)
