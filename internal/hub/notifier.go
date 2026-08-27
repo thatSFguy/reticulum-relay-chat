@@ -52,11 +52,51 @@ type OfflineNotifier interface {
 	NotifyAbsent(pubKey []byte, title, body string) error
 }
 
+// PeerAddressPinner is an optional OfflineNotifier capability: the hub
+// tells it which peers must stay addressable, and it keeps their
+// announce-cache entries from being evicted.
+//
+// This matters because the recipient's stamp_cost lives in that cached
+// announce and nowhere else. The cache is bounded (reticulum-go's
+// KnownIdentityCapacity, 4096) and evicts the oldest unpinned entry, so
+// on a busy public mesh — where announcing peers outnumber slots
+// several times over — the people this hub actually serves are pushed
+// out by strangers it will never message. The mention would then go out
+// unstamped and be discarded by a recipient that enforces stamps.
+//
+// The set is re-asserted whole rather than mutated, so a missed removal
+// cannot leak a pin.
+type PeerAddressPinner interface {
+	PinPeers(pubKeys [][]byte)
+}
+
 // SetOfflineNotifier installs the notifier. Call before Start.
 func (h *Hub) SetOfflineNotifier(n OfflineNotifier) {
 	h.mu.Lock()
 	h.notifier = n
 	h.mu.Unlock()
+	h.pinPeerAddresses()
+}
+
+// pinPeerAddresses re-asserts the set of peers that must stay
+// addressable. Cheap and idempotent, so it runs whenever the directory
+// changes rather than trying to track deltas.
+func (h *Hub) pinPeerAddresses() {
+	h.mu.Lock()
+	pinner, _ := h.notifier.(PeerAddressPinner)
+	var keys [][]byte
+	if pinner != nil {
+		keys = make([][]byte, 0, len(h.peers))
+		for _, id := range peerreg.SortedIdentities(h.peers) {
+			if p := h.peers[id]; len(p.PublicKey) == peerreg.PublicKeyLen {
+				keys = append(keys, append([]byte(nil), p.PublicKey...))
+			}
+		}
+	}
+	h.mu.Unlock()
+	if pinner != nil {
+		pinner.PinPeers(keys)
+	}
 }
 
 // mentionPushInterval is the minimum gap between push attempts for one

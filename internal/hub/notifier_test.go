@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -365,5 +366,73 @@ func TestAStampedUploadStillClearsTheQueue(t *testing.T) {
 
 	if held := pendingFor(h, id); len(held) != 0 {
 		t.Fatalf("%d mentions still queued after a stamped upload, want none", len(held))
+	}
+}
+
+// pinRecorder captures the pinned set the hub asserts.
+type pinRecorder struct {
+	fakeNotifier
+	mu     sync.Mutex
+	pinned [][]byte
+}
+
+func (p *pinRecorder) PinPeers(keys [][]byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pinned = append([][]byte(nil), keys...)
+}
+
+func (p *pinRecorder) pinnedCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pinned)
+}
+
+// The recipient's stamp_cost lives only in their cached announce, and
+// that cache evicts the oldest unpinned entry. A hub that never pins is
+// one busy afternoon away from losing the key material it needs to send
+// a deliverable notification.
+func TestKnownPeersArePinnedAgainstCacheEviction(t *testing.T) {
+	h := mentionHub(t, nil)
+	rec := &pinRecorder{}
+	h.SetOfflineNotifier(rec)
+
+	visitAndLeave(t, h, 0xB2, "bob")
+	if got := rec.pinnedCount(); got != 1 {
+		t.Fatalf("pinned %d peers after one visit, want 1", got)
+	}
+
+	visitAndLeave(t, h, 0xC3, "carol")
+	if got := rec.pinnedCount(); got != 2 {
+		t.Fatalf("pinned %d peers after two visits, want 2", got)
+	}
+
+	_, id := keyFor(0xB2)
+	h.mu.Lock()
+	want := append([]byte(nil), h.peers[hex.EncodeToString(id)].PublicKey...)
+	h.mu.Unlock()
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var found bool
+	for _, k := range rec.pinned {
+		if bytes.Equal(k, want) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("bob's key is not in the pinned set")
+	}
+}
+
+// A notifier that does not implement the capability must still work.
+func TestPinningIsOptional(t *testing.T) {
+	h := mentionHub(t, nil)
+	h.SetOfflineNotifier(&fakeNotifier{})
+	visitAndLeave(t, h, 0xB2, "bob") // must not panic
+	id, _ := queueMentionFor(t, h, "hello")
+	h.pushPendingMentions()
+	if held := pendingFor(h, id); len(held) != 0 {
+		t.Errorf("%d mentions still queued; delivery broke without the pin capability", len(held))
 	}
 }

@@ -329,6 +329,10 @@ func (s *Session) rememberPeer() {
 	p.LastSeenTS = h.nowUnix()
 	h.peersDirty = true
 	h.mu.Unlock()
+
+	// A newly filed peer must not be evicted from the announce cache by
+	// stranger churn before we ever need to reach them.
+	h.pinPeerAddresses()
 }
 
 // evictOldestPeerLocked drops the least recently seen peer to make room

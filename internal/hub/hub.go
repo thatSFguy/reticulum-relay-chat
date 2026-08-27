@@ -539,6 +539,7 @@ func (h *Hub) doPrune() {
 		h.log.Printf("hub: pruned stale registered room #%s", name)
 	}
 	h.pruneHistory()
+	h.pinPeerAddresses()
 	h.pushPendingMentions()
 	h.flushPeers()
 }

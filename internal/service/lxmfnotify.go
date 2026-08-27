@@ -243,6 +243,21 @@ func ensureAddressable(t *rns.Transport, known *rns.KnownIdentity) {
 	t.Restore(known)
 }
 
+// PinPeers implements hub.PeerAddressPinner: it keeps the announce-cache
+// entries of the hub's known peers resident, so their §5.7.4 stamp_cost
+// survives the churn of a busy public mesh.
+func (n *lxmfNotifier) PinPeers(pubKeys [][]byte) {
+	dests := make([][]byte, 0, len(pubKeys))
+	for _, pub := range pubKeys {
+		dest, err := lxmfaddr.DeliveryDest(pub)
+		if err != nil {
+			continue
+		}
+		dests = append(dests, dest)
+	}
+	n.svc.transport.PinDestinations(dests)
+}
+
 // NotifyAbsent uploads one notification for the peer owning pubKey to a
 // propagation node, where it waits for that peer's client to sync.
 func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
