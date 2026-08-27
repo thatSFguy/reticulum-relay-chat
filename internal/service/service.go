@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thatSFguy/reticulum-go/lxmf"
 	"github.com/thatSFguy/reticulum-go/rns"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/hub"
@@ -95,6 +96,11 @@ type Service struct {
 	// Service.mu must NEVER call into the hub in a way that takes
 	// hub.mu. Acquire order is always hub.mu → Service.mu, never the
 	// reverse. Violating this reintroduces the sessionFor deadlock.
+	// lxmfDest is the hub's own lxmf.delivery destination hash, set only
+	// when mention notification over LXMF is enabled. nil means there is
+	// nothing to announce.
+	lxmfDest []byte
+
 	mu         sync.Mutex
 	sessions   map[string]*hub.Session // linkID hex -> session
 	identities map[string]peerBinding  // linkID hex -> what LINKIDENTIFY proved
@@ -155,6 +161,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 			logger.Printf("lxmf: mention notifications disabled — %v", err)
 		} else {
 			svc.hub.SetOfflineNotifier(notifier)
+			svc.lxmfDest = id.DestinationHashFor(lxmf.FullName())
 		}
 	}
 
@@ -207,6 +214,10 @@ func (s *Service) Run(ctx context.Context) error {
 	// runs regardless.
 	if s.cfg.Hub.AnnounceOnStart {
 		s.announceOnce()
+		// The LXMF delivery destination is announced on the same
+		// schedule: a notification from an unannounced source cannot be
+		// verified by its recipient.
+		s.announceDelivery()
 	}
 	s.log.Printf("RRC hub running — add this hub in a client by hash: %s", s.DestHashHex())
 
@@ -249,6 +260,7 @@ func (s *Service) announceLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			s.announceOnce()
+			s.announceDelivery()
 		}
 	}
 }

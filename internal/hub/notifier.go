@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -21,6 +22,19 @@ import (
 // and stays that way: it knows only that something might be able to
 // reach an absent peer given their public key. internal/service
 // implements that against LXMF.
+
+// ErrDeliveredUnstamped reports an upload that reached a propagation
+// node but could not be proof-of-work stamped, because the hub has
+// never heard the recipient announce and so does not know their §5.7.4
+// stamp_cost.
+//
+// Such a message is deliverable to a recipient that does not enforce
+// stamps and is discarded in silence by one that does — and the hub
+// cannot tell which, because a propagation upload is acknowledged by
+// the NODE, never by the recipient. So the mention stays queued for RRC
+// rather than being dropped: at worst the peer sees it twice, which is
+// a far better failure than the notification vanishing.
+var ErrDeliveredUnstamped = errors.New("hub: notification uploaded without a stamp")
 
 // OfflineNotifier delivers a message to a peer the hub cannot reach over
 // RRC, addressed by the public key that peer proved when it last
@@ -108,7 +122,15 @@ func (h *Hub) pushPendingMentions() {
 	h.mu.Unlock()
 
 	for _, push := range batch {
-		if err := n.NotifyAbsent(push.pubKey, push.title, push.body); err != nil {
+		err := n.NotifyAbsent(push.pubKey, push.title, push.body)
+		if errors.Is(err, ErrDeliveredUnstamped) {
+			// Uploaded, but we could not prove it will be accepted.
+			// Keep it queued so the RRC path remains a fallback.
+			h.log.Printf("mentions: uploaded %d notification(s) to %s… unstamped (no announce heard); keeping them queued for RRC",
+				push.count, push.idHex[:8])
+			continue
+		}
+		if err != nil {
 			// Expected often enough not to be noise at the default level:
 			// no node reachable, or a peer whose LXMF identity differs
 			// from their RRC one.

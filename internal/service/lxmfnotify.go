@@ -10,6 +10,7 @@ import (
 
 	"github.com/thatSFguy/reticulum-go/lxmf"
 	"github.com/thatSFguy/reticulum-go/rns"
+	"github.com/thatSFguy/reticulum-relay-chat/internal/hub"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/lxmfaddr"
 )
 
@@ -66,7 +67,7 @@ type lxmfNotifier struct {
 // than an anonymous one: the recipient sees a sender they can reply to,
 // and their client can return a delivery proof.
 func newLXMFNotifier(s *Service) (*lxmfNotifier, error) {
-	delivery, err := lxmf.NewDelivery(s.transport, s.identity, nil)
+	delivery, err := lxmf.NewDelivery(s.transport, s.identity, s.buildDeliveryAnnounce)
 	if err != nil {
 		return nil, fmt.Errorf("lxmf delivery: %w", err)
 	}
@@ -92,6 +93,52 @@ func newLXMFNotifier(s *Service) (*lxmfNotifier, error) {
 	// accepting and what it charges.
 	s.transport.RegisterAnnounceHandler(n)
 	return n, nil
+}
+
+// buildDeliveryAnnounce builds an announce for the hub's OWN
+// lxmf.delivery destination.
+//
+// Without it the hub can emit a notification but nobody can accept one.
+// The recipient sees a message whose source is a destination it has
+// never heard announce and holds no public key for, so it cannot verify
+// the signature — and a client configured to drop unverified messages
+// discards it in silence. It also cannot reply or return a delivery
+// proof, which is the entire reason this hub registers a delivery
+// destination rather than sending anonymously.
+//
+// The app_data is the §4.3 form: display name, and a nil stamp_cost
+// because this destination is an outbox, not an inbox — it has no
+// inbound traffic to price and asking senders to grind proof-of-work at
+// a hub that will not read their replies would be dishonest.
+func (s *Service) buildDeliveryAnnounce(context byte) (*rns.Packet, error) {
+	appData, err := rns.EncodeLXMFAppData([]byte(s.cfg.Hub.Name), nil)
+	if err != nil {
+		return nil, fmt.Errorf("lxmf announce app_data: %w", err)
+	}
+	return rns.BuildAnnounceWithContext(s.identity, lxmf.FullName(), appData, nil, context)
+}
+
+// announceDelivery broadcasts that announce. Called wherever the hub
+// announces rrc.hub, so the two destinations keep the same schedule.
+func (s *Service) announceDelivery() {
+	if s.lxmfDest == nil {
+		return
+	}
+	appData, err := rns.EncodeLXMFAppData([]byte(s.cfg.Hub.Name), nil)
+	if err != nil {
+		s.log.Printf("lxmf announce build failed: %v", err)
+		return
+	}
+	pkt, err := rns.BuildAnnounce(s.identity, lxmf.FullName(), appData, nil)
+	if err != nil {
+		s.log.Printf("lxmf announce build failed: %v", err)
+		return
+	}
+	if err := s.transport.Broadcast(pkt); err != nil {
+		s.log.Printf("lxmf announce broadcast failed: %v", err)
+		return
+	}
+	s.log.Printf("announced lxmf.delivery (%x)", s.lxmfDest)
 }
 
 // AspectMatch selects lxmf.propagation announces.
@@ -228,8 +275,22 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 	if err != nil {
 		return err
 	}
+	// Whether we can stamp depends on having heard this peer announce:
+	// the stamp_cost lives in that announce's app_data, and nothing
+	// else carries it. Decide before sending, because ensureAddressable
+	// may be about to install a stub that has none.
+	stamped := false
+	if cached := n.svc.transport.Recall(known.DestHash); cached != nil && len(cached.AppData) > 0 {
+		stamped = true
+	}
+
 	if _, err := n.delivery.SendPropagated(node, known.DestHash, []byte(title), []byte(body), nil); err != nil {
 		return fmt.Errorf("propagate to %x via %x: %w", known.DestHash[:4], node[:4], err)
+	}
+	if !stamped {
+		// The upload succeeded; its acceptance did not. See
+		// hub.ErrDeliveredUnstamped.
+		return fmt.Errorf("%w: %x has never announced", hub.ErrDeliveredUnstamped, known.DestHash[:4])
 	}
 	return nil
 }

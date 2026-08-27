@@ -14,3 +14,5 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 )
+
+replace github.com/thatSFguy/reticulum-go => /tmp/claude-1000/-home-robw-projects-reticulum-relay-chat/c1548c0b-fa7d-44d7-9136-4ac561e3a4ec/scratchpad/rgo

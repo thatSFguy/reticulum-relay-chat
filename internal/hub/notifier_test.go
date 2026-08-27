@@ -334,3 +334,36 @@ func TestAFullQueueDoesNotLoseMentionsArrivingDuringAPush(t *testing.T) {
 		t.Errorf("surviving mention is %q, want the one that arrived during the push", held[0].Text)
 	}
 }
+
+// A propagation upload is acknowledged by the NODE, never by the
+// recipient. When the hub could not stamp the message — it has never
+// heard that peer announce, so it does not know their stamp_cost — a
+// recipient enforcing stamps discards it in silence. Dropping the
+// mention on the strength of that upload destroys the RRC fallback too,
+// and the notification is simply lost.
+func TestAnUnstampedUploadKeepsTheMentionQueued(t *testing.T) {
+	h := mentionHub(t, nil)
+	h.SetOfflineNotifier(&fakeNotifier{fail: ErrDeliveredUnstamped})
+
+	id, _ := queueMentionFor(t, h, "are you there")
+	h.pushPendingMentions()
+
+	held := pendingFor(h, id)
+	if len(held) != 1 {
+		t.Fatalf("%d mentions queued, want the mention kept for RRC after an unstamped upload", len(held))
+	}
+}
+
+// The confident case is unchanged: a stamped upload is trusted, and a
+// second copy over RRC would be a duplicate.
+func TestAStampedUploadStillClearsTheQueue(t *testing.T) {
+	h := mentionHub(t, nil)
+	h.SetOfflineNotifier(&fakeNotifier{})
+
+	id, _ := queueMentionFor(t, h, "are you there")
+	h.pushPendingMentions()
+
+	if held := pendingFor(h, id); len(held) != 0 {
+		t.Fatalf("%d mentions still queued after a stamped upload, want none", len(held))
+	}
+}
