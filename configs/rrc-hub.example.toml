@@ -129,6 +129,35 @@ history_replay_bytes = 2048              # (default 2048)
 history_pull_count = 100                 # (default 100)
 history_pull_bytes = 16384               # (default 16384)
 
+# --- mention notifications --------------------------------------------
+#
+# Off by default. When on, a message that names someone — "@alice", or
+# "@" plus 6+ characters of their identity hash — reaches them even if
+# they were not in the room:
+#
+#   * in the room already  -> nothing; they got the message itself
+#   * connected elsewhere  -> a NOTICE right away
+#   * not connected        -> held, and delivered when they next connect
+#
+# Resolution is deliberately conservative. RRC nicknames are advisory
+# and not unique, so an ambiguous "@name" notifies nobody rather than
+# guessing; the hash-prefix form is the way to be certain.
+#
+# Anyone can turn this off for themselves with /notify off.
+mention_notify = false
+
+# Where the peer directory lives: the identities this hub has met, their
+# public keys, their last nickname, and any mentions waiting for them.
+# The keys are what make someone reachable after their link is gone.
+# (default "peers.toml")
+peer_registry_path = "peers.toml"
+
+# Bounds. The directory evicts the least recently seen identity when
+# full; a peer's pending mentions evict oldest-first.
+max_known_peers = 2048         # (default 2048)
+max_pending_mentions = 20      # per peer (default 20)
+mention_snippet_bytes = 140    # how much of the message a notification quotes (default 140)
+
 [hub.limits]
 # Client-facing limits advertised in WELCOME and enforced hub-side.
 max_nick_bytes = 32                  # (default 32)

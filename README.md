@@ -36,9 +36,16 @@ This hub targets feature parity with the reference Python hub `rrcd`.
   the original envelopes — same id, same timestamp — bracketed by
   ordinary NOTICEs, so **no client change is required**. Off by default:
   retaining plaintext conversation on disk is the operator's call.
+- **Mention notifications (optional)** — with `mention_notify`, a message
+  naming someone (`@alice`, or `@` plus 6+ hex of their identity hash)
+  reaches them even if they were not in the room: immediately if they
+  are connected elsewhere, held for their return if they are not.
+  Ambiguous nicknames notify nobody — RRC nicks are advisory and not
+  unique, so the hub declines rather than guessing. `/notify off` opts
+  out. Off by default.
 - **Slash commands** — `/list`, `/who`, `/topic`, `/mode`, `/kick`,
   `/op`/`/deop`/`/voice`/`/devoice`, `/ban`, `/invite`, `/history`,
-  `/register`/
+  `/notify`, `/register`/
   `/unregister`, and the operator commands `/stats`, `/reload`, `/kline`.
 - **Operator / trust model** — `trusted_identities` server operators,
   server-wide klines, room founders, and per-room bans/invites.
@@ -58,6 +65,9 @@ internal/
                     modes, slash commands, fan-out, background loops —
                     driven through a Link interface
   roomreg/          rooms.toml + kline TOML persistence
+  history/          bounded, expiring per-room transcript store
+  peerreg/          peers.toml — known identities, keys, pending mentions
+  lxmfaddr/         derives a peer's LXMF delivery address from its key
   service/          wires the hub to a live Reticulum stack: identity,
                     TCP attach, rrc.hub destination, announce, link
                     routing, RNS Resource transfer, dead-link janitor

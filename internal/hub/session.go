@@ -237,6 +237,11 @@ func (s *Session) handleHello(env *rrc.Envelope) {
 
 	// Greeting (MOTD) after WELCOME.
 	s.sendGreeting()
+
+	// File this identity — its key is what makes it addressable later —
+	// then hand over anything that arrived while it was away.
+	s.rememberPeer()
+	s.flushMentions()
 }
 
 // resetForReHello removes the peer from all rooms and clears its state.
@@ -575,6 +580,7 @@ func (s *Session) handleMsg(env *rrc.Envelope, typ int) {
 	// Retain what the room actually saw — env carries the rewritten
 	// K_SRC and the normalized nick from just above.
 	h.recordMessage(room, env)
+	h.noteMentions(room, env)
 }
 
 // --- PING / PONG ------------------------------------------------------

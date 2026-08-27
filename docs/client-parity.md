@@ -156,7 +156,42 @@ and `/history purge <room>` (room operators) drops a transcript. Both
 are ordinary slash commands — a `MSG` whose body starts with `/` — so
 any client that can send text already supports them.
 
-## 8. Wire constants (reference — unchanged)
+## 8. Mention notifications — nothing to implement
+
+With `mention_notify`, a message that names someone reaches them even if
+they were not in the room. As with history, **a client needs no
+changes**: everything arrives as ordinary `NOTICE` text.
+
+A client is named by either form:
+
+- `@nick` — resolved against the room's members first, then against
+  identities the hub has seen before. An ambiguous nickname resolves to
+  nobody, because RRC nicknames are advisory and not unique.
+- `@<hashprefix>` — `@` plus 6 or more hex characters of an identity
+  hash. Exact, and the way to be certain.
+
+What the named client receives depends on where it is:
+
+| Where they are | What arrives |
+|---|---|
+| In the room | Nothing extra — fan-out already delivered the message |
+| Connected, elsewhere | `NOTICE` in that room: `you were mentioned in <room> by <who>: <text>` |
+| Not connected | Held; delivered after `WELCOME` on their next session |
+
+Held mentions arrive as a `--- N mention(s) while you were away ---`
+`NOTICE` followed by one `NOTICE` per mention, each carrying the room,
+how long ago, who, and a truncated quote.
+
+`/notify on|off` (and bare `/notify` to check) lets any client opt out.
+Like every other slash command it is just a `MSG` body starting with
+`/`, so nothing needs to be added to a client to support it.
+
+> **Note for client authors:** a client that wants a distinct mention
+> UX can match the `you were mentioned in ` and
+> `--- N mention(s) while you were away ---` prefixes, but this is
+> optional — the text reads correctly as-is.
+
+## 9. Wire constants (reference — unchanged)
 
 - Envelope keys: `KV`=0 (version, must be 1), `KT`=1 (type), `KID`=2
   (8 random bytes), `KTS`=3 (ms since epoch), `KSrc`=4 (16-byte identity

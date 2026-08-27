@@ -81,6 +81,15 @@ type HubConfig struct {
 	HistoryPullCount int `toml:"history_pull_count"`
 	HistoryPullBytes int `toml:"history_pull_bytes"`
 
+	// Mentions — telling someone they were named while they were not
+	// looking. Independent of history: a hub can notify without
+	// retaining, or retain without notifying.
+	MentionNotify       bool   `toml:"mention_notify"`
+	PeerRegistryPath    string `toml:"peer_registry_path"`
+	MaxKnownPeers       int    `toml:"max_known_peers"`
+	MaxPendingMentions  int    `toml:"max_pending_mentions"`
+	MentionSnippetBytes int    `toml:"mention_snippet_bytes"`
+
 	Limits LimitsConfig `toml:"limits"`
 }
 
@@ -154,6 +163,11 @@ func defaults() Config {
 			HistoryReplayBytes:             2048,
 			HistoryPullCount:               100,
 			HistoryPullBytes:               16384,
+			MentionNotify:                  false,
+			PeerRegistryPath:               "peers.toml",
+			MaxKnownPeers:                  2048,
+			MaxPendingMentions:             20,
+			MentionSnippetBytes:            140,
 			Limits: LimitsConfig{
 				MaxNickBytes:        32,
 				MaxRoomNameBytes:    64,
@@ -173,6 +187,7 @@ func Load(path string) (*Config, error) {
 	}
 	applyLimitDefaults(&c.Hub.Limits)
 	applyHistoryDefaults(&c.Hub)
+	applyMentionDefaults(&c.Hub)
 	if c.Hub.MaxResourceBytes <= 0 {
 		c.Hub.MaxResourceBytes = 262144
 	}
@@ -226,6 +241,24 @@ func applyHistoryDefaults(h *HubConfig) {
 	}
 	if h.HistoryPullBytes <= 0 {
 		h.HistoryPullBytes = d.HistoryPullBytes
+	}
+}
+
+// applyMentionDefaults fills in any unset mention knob, so enabling
+// notifications without tuning them still yields bounded behavior.
+func applyMentionDefaults(h *HubConfig) {
+	d := defaults().Hub
+	if h.PeerRegistryPath == "" {
+		h.PeerRegistryPath = d.PeerRegistryPath
+	}
+	if h.MaxKnownPeers <= 0 {
+		h.MaxKnownPeers = d.MaxKnownPeers
+	}
+	if h.MaxPendingMentions <= 0 {
+		h.MaxPendingMentions = d.MaxPendingMentions
+	}
+	if h.MentionSnippetBytes <= 0 {
+		h.MentionSnippetBytes = d.MentionSnippetBytes
 	}
 }
 

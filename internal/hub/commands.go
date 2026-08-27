@@ -64,6 +64,8 @@ func (s *Session) handleCommand(trimmed, _, room string) {
 		s.cmdInvite(parts, room)
 	case "history":
 		s.cmdHistory(parts, room)
+	case "notify":
+		s.cmdNotify(parts, room)
 	default:
 		s.sendError(roomPtr(room), "unrecognized command")
 	}
@@ -1188,4 +1190,79 @@ func (s *Session) historyPurge(parts []string, room string) {
 	h.dropHistory(target)
 	h.log.Printf("%s purged the history of #%s", shortHash(s.identity()), target)
 	s.sendNotice(roomPtr(target), "history for "+target+" purged")
+}
+
+// cmdNotify controls whether this identity is told about mentions it
+// missed.
+//
+//	/notify            — report the current setting
+//	/notify on|off     — change it
+//
+// Consent matters here in a way it does not for the rest of the hub:
+// a mention notification can leave this hub entirely and arrive in
+// somebody's LXMF client, so anyone must be able to switch it off
+// without an operator's help.
+func (s *Session) cmdNotify(parts []string, room string) {
+	h := s.hub
+	if !h.cfg.MentionNotify {
+		s.sendNotice(roomPtr(room), "this hub does not send mention notifications")
+		return
+	}
+	idHex := s.identityHex()
+	if idHex == "" {
+		s.sendError(roomPtr(room), "identify first")
+		return
+	}
+
+	if len(parts) < 2 {
+		h.mu.Lock()
+		optOut := false
+		if p, ok := h.peers[idHex]; ok {
+			optOut = p.NotifyOptOut
+		}
+		h.mu.Unlock()
+		state := "on"
+		if optOut {
+			state = "off"
+		}
+		s.sendNotice(roomPtr(room), "mention notifications are "+state+" (use /notify on|off)")
+		return
+	}
+
+	var optOut bool
+	switch strings.ToLower(parts[1]) {
+	case "on", "yes", "enable":
+		optOut = false
+	case "off", "no", "disable":
+		optOut = true
+	default:
+		s.sendNotice(roomPtr(room), "usage: /notify on|off")
+		return
+	}
+
+	h.mu.Lock()
+	p, ok := h.peers[idHex]
+	if !ok {
+		h.mu.Unlock()
+		// Only an identified peer has a directory entry, and only a
+		// directory entry can be reached later — so there is nothing to
+		// set a preference on.
+		s.sendError(roomPtr(room), "identify first")
+		return
+	}
+	p.NotifyOptOut = optOut
+	if optOut {
+		// Turning notifications off discards what is already waiting.
+		// Holding them would deliver, on the next connection, exactly
+		// the thing that was just declined.
+		p.Mentions = nil
+	}
+	h.peersDirty = true
+	h.mu.Unlock()
+
+	if optOut {
+		s.sendNotice(roomPtr(room), "mention notifications off; anything pending was discarded")
+	} else {
+		s.sendNotice(roomPtr(room), "mention notifications on")
+	}
 }

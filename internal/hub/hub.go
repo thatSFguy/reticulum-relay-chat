@@ -16,6 +16,7 @@ import (
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/history"
+	"github.com/thatSFguy/reticulum-relay-chat/internal/peerreg"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/roomreg"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
@@ -70,6 +71,12 @@ type Hub struct {
 	// treats as "no history" rather than an error.
 	history *history.Store
 
+	// peers is the directory of identities this hub has met: their keys,
+	// their last nickname, and any mentions waiting for them. Keyed by
+	// identity hex.
+	peers      map[string]*peerreg.Peer
+	peersDirty bool // pending peers.toml write, flushed on the prune timer
+
 	trusted map[string]struct{} // server-op identity hashes (hex)
 	banned  map[string]struct{} // config-banned ∪ kline hashes (hex)
 	klines  map[string]struct{} // kline-only hashes (hex), for persistence
@@ -105,6 +112,7 @@ func New(identityHash []byte, cfg config.HubConfig, logger *log.Logger) *Hub {
 		startedAt:    time.Now().UnixMilli(),
 		rooms:        make(map[string]*Room),
 		sessions:     make(map[*Session]struct{}),
+		peers:        make(map[string]*peerreg.Peer),
 		trusted:      make(map[string]struct{}),
 		banned:       make(map[string]struct{}),
 		klines:       make(map[string]struct{}),
@@ -113,7 +121,71 @@ func New(identityHash []byte, cfg config.HubConfig, logger *log.Logger) *Hub {
 	h.loadKlines()
 	h.loadRegistry()
 	h.openHistory()
+	h.loadPeers()
 	return h
+}
+
+// loadPeers reads the peer directory. As with the room registry, a file
+// that will not load leaves the hub running with an empty directory
+// rather than refusing to start: mention notification is a convenience,
+// and a hub that cannot remember people can still relay for them.
+func (h *Hub) loadPeers() {
+	if !h.cfg.MentionNotify {
+		return
+	}
+	peers, err := peerreg.Load(h.cfg.PeerRegistryPath)
+	if err != nil {
+		h.log.Printf("peers: starting empty — %v", err)
+		return
+	}
+	h.peers = peers
+	if len(peers) > 0 {
+		h.log.Printf("peers: loaded %d known identities from %s", len(peers), h.cfg.PeerRegistryPath)
+	}
+}
+
+// flushPeers persists the directory when something changed.
+func (h *Hub) flushPeers() {
+	if !h.cfg.MentionNotify {
+		return
+	}
+	h.mu.Lock()
+	if !h.peersDirty {
+		h.mu.Unlock()
+		return
+	}
+	snapshot := make(map[string]*peerreg.Peer, len(h.peers))
+	for id, p := range h.peers {
+		cp := *p
+		cp.PublicKey = append([]byte(nil), p.PublicKey...)
+		cp.Mentions = append([]peerreg.Mention(nil), p.Mentions...)
+		snapshot[id] = &cp
+	}
+	h.peersDirty = false
+	h.mu.Unlock()
+
+	if err := peerreg.Save(h.cfg.PeerRegistryPath, snapshot); err != nil {
+		h.log.Printf("peers: save failed: %v", err)
+		h.mu.Lock()
+		h.peersDirty = true // retry on the next flush
+		h.mu.Unlock()
+	}
+}
+
+// mentionQueueLimit is how many mentions may wait for one peer.
+func (h *Hub) mentionQueueLimit() int {
+	if h.cfg.MaxPendingMentions > 0 {
+		return h.cfg.MaxPendingMentions
+	}
+	return 20
+}
+
+// mentionSnippetBytes is how much of a message a notification quotes.
+func (h *Hub) mentionSnippetBytes() int {
+	if h.cfg.MentionSnippetBytes > 0 {
+		return h.cfg.MentionSnippetBytes
+	}
+	return 140
 }
 
 // openHistory attaches the transcript store when the operator enabled
@@ -372,6 +444,10 @@ func (h *Hub) Stop() {
 	h.mu.Lock()
 	h.persistKlinesLocked()
 	h.mu.Unlock()
+	// The peer directory holds mentions nobody has collected yet —
+	// losing it on shutdown would drop notifications that are still
+	// owed.
+	h.flushPeers()
 }
 
 // pingLoop sends hub keepalive PINGs and tears down links with a
@@ -456,6 +532,7 @@ func (h *Hub) doPrune() {
 		h.log.Printf("hub: pruned stale registered room #%s", name)
 	}
 	h.pruneHistory()
+	h.flushPeers()
 }
 
 // reaperLoop drops expired pending resource expectations.
