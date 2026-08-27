@@ -16,9 +16,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thatSFguy/reticulum-go/rns"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/hub"
-	"github.com/thatSFguy/reticulum-relay-chat/internal/rns"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
 
@@ -148,7 +148,14 @@ func (s *Service) DestHashHex() string { return hex.EncodeToString(s.destHash) }
 // cancelled.
 func (s *Service) Run(ctx context.Context) error {
 	for _, iface := range s.cfg.Interfaces {
-		tc, err := rns.DialTCP(iface.Address, 15*time.Second)
+		// Reconnecting client, not a bare DialTCP: the hub is a
+		// long-lived unattended daemon, so every transport drop it can
+		// recover from, it must. A bare client turns a peer restart, a
+		// NAT idle eviction, or a single oversized inbound HDLC frame
+		// (rns returns ErrFrameTooLarge and drops the connection rather
+		// than resynchronizing) into a permanently dead uplink that
+		// only a process restart clears.
+		tc, err := rns.DialReconnectingTCP(iface.Address, 15*time.Second, s.log)
 		if err != nil {
 			return fmt.Errorf("dial %s: %w", iface.Address, err)
 		}

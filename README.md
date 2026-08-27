@@ -53,16 +53,19 @@ internal/
                     TCP attach, rrc.hub destination, announce, link
                     routing, RNS Resource transfer, dead-link janitor
   config/           TOML configuration loader
-  rns/              the Reticulum protocol stack — identity, packet,
-                    link, crypto, announce, TCP/HDLC transport
 configs/            example configuration
 ```
 
-The `internal/rns` package is copied verbatim from the sibling
-[`reticulum-forwarding-service`](../reticulum-forwarding-service)
-project — a pure-Go Reticulum/LXMF implementation verified against
-upstream Python RNS and live clients. It is self-contained (stdlib +
-`golang.org/x/crypto` + msgpack) and carries its own test suite.
+The Reticulum protocol stack — identity, packet, link, crypto,
+announce, TCP/HDLC transport, Resource transfer — comes from
+[`reticulum-go`](https://github.com/thatSFguy/reticulum-go)
+(`github.com/thatSFguy/reticulum-go/rns`), the pure-Go RNS/LXMF module
+shared with `reticulum-group-chat`. It was previously vendored here as
+`internal/rns`; that copy has been removed in favor of the module, so
+stack fixes and interop test coverage are shared rather than
+forward-ported by hand. The module also carries an `lxmf` package
+(messages, delivery, propagation-node store-and-forward), which this
+hub does not use yet.
 
 ## Build & run
 
@@ -93,10 +96,10 @@ the TOML persistence layer are unit-tested (`internal/rrc`,
 `rrcd`; where `rrcd` and the published RRC spec diverge, `rrcd` is
 followed (see `AGENTS.md`).
 
-`internal/service` wires the hub to the responder side of the `rns`
-link layer, which has not yet been exercised end-to-end against a live
-client — the `rns` package was written for an LXMF *initiator*, so the
-responder-link path is the part most in need of live interop
+`internal/service` wires the hub to the responder side of the
+`reticulum-go` link layer, which has not yet been exercised end-to-end
+against a live client — that stack was written for an LXMF *initiator*,
+so the responder-link path is the part most in need of live interop
 verification. RNS Resource transfer is wired in both directions
 (outbound send, inbound reassembly routed by `link_id`) but is likewise
 unverified against a live client.
