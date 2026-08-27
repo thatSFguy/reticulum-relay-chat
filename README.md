@@ -43,6 +43,13 @@ This hub targets feature parity with the reference Python hub `rrcd`.
   Ambiguous nicknames notify nobody — RRC nicks are advisory and not
   unique, so the hub declines rather than guessing. `/notify off` opts
   out. Off by default.
+- **Offline delivery over LXMF (optional)** — with `mention_lxmf`, a
+  waiting mention is handed to an LXMF propagation node, where the
+  recipient's own client (Sideband, MeshChat, the mobile app) collects
+  it on its next sync. The address is derived from the public key the
+  peer proved over §6.6 LINKIDENTIFY, so nobody registers anything and
+  no client changes. Delivery failure is expected and harmless: the
+  mention stays queued for their next RRC session.
 - **Slash commands** — `/list`, `/who`, `/topic`, `/mode`, `/kick`,
   `/op`/`/deop`/`/voice`/`/devoice`, `/ban`, `/invite`, `/history`,
   `/notify`, `/register`/
@@ -119,6 +126,10 @@ followed (see `AGENTS.md`).
 `reticulum-go` link layer, which has not yet been exercised end-to-end
 against a live client — that stack was written for an LXMF *initiator*,
 so the responder-link path is the part most in need of live interop
-verification. RNS Resource transfer is wired in both directions
+verification. The LXMF mention path in `internal/service/lxmfnotify.go`
+is likewise unverified against a live propagation node: the store it
+draws from, the addressing, and the hub-side push logic are unit-tested,
+but the upload itself has only `reticulum-go`'s own interop coverage
+behind it. RNS Resource transfer is wired in both directions
 (outbound send, inbound reassembly routed by `link_id`) but is likewise
 unverified against a live client.

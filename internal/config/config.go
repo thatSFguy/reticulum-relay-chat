@@ -89,6 +89,12 @@ type HubConfig struct {
 	MaxKnownPeers       int    `toml:"max_known_peers"`
 	MaxPendingMentions  int    `toml:"max_pending_mentions"`
 	MentionSnippetBytes int    `toml:"mention_snippet_bytes"`
+	// MentionLXMF hands a waiting mention to an LXMF propagation node,
+	// where the recipient's own client collects it — the only way to
+	// reach someone whose RRC link is gone. Without it a mention still
+	// waits, but nothing tells them to come and look.
+	MentionLXMF         bool   `toml:"mention_lxmf"`
+	LXMFPropagationNode string `toml:"lxmf_propagation_node"`
 
 	Limits LimitsConfig `toml:"limits"`
 }
@@ -168,6 +174,7 @@ func defaults() Config {
 			MaxKnownPeers:                  2048,
 			MaxPendingMentions:             20,
 			MentionSnippetBytes:            140,
+			MentionLXMF:                    false,
 			Limits: LimitsConfig{
 				MaxNickBytes:        32,
 				MaxRoomNameBytes:    64,

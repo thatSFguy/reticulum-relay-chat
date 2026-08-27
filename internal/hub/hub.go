@@ -77,6 +77,12 @@ type Hub struct {
 	peers      map[string]*peerreg.Peer
 	peersDirty bool // pending peers.toml write, flushed on the prune timer
 
+	// notifier, when set, can reach a peer whose link is gone. lastPush
+	// throttles per-peer attempts; it is in-memory only, so a restart
+	// retries rather than losing a notification.
+	notifier OfflineNotifier
+	lastPush map[string]time.Time
+
 	trusted map[string]struct{} // server-op identity hashes (hex)
 	banned  map[string]struct{} // config-banned ∪ kline hashes (hex)
 	klines  map[string]struct{} // kline-only hashes (hex), for persistence
@@ -113,6 +119,7 @@ func New(identityHash []byte, cfg config.HubConfig, logger *log.Logger) *Hub {
 		rooms:        make(map[string]*Room),
 		sessions:     make(map[*Session]struct{}),
 		peers:        make(map[string]*peerreg.Peer),
+		lastPush:     make(map[string]time.Time),
 		trusted:      make(map[string]struct{}),
 		banned:       make(map[string]struct{}),
 		klines:       make(map[string]struct{}),
@@ -532,6 +539,7 @@ func (h *Hub) doPrune() {
 		h.log.Printf("hub: pruned stale registered room #%s", name)
 	}
 	h.pruneHistory()
+	h.pushPendingMentions()
 	h.flushPeers()
 }
 

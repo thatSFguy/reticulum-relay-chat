@@ -145,6 +145,19 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 	}); err != nil {
 		return nil, fmt.Errorf("register rrc.hub destination: %w", err)
 	}
+	// Mention notifications over LXMF, when the operator asked for them.
+	// A hub that cannot build the notifier still runs: it falls back to
+	// holding mentions until the peer's next RRC session, which is what
+	// it does with the feature off.
+	if cfg.Hub.MentionNotify && cfg.Hub.MentionLXMF {
+		notifier, err := newLXMFNotifier(svc)
+		if err != nil {
+			logger.Printf("lxmf: mention notifications disabled — %v", err)
+		} else {
+			svc.hub.SetOfflineNotifier(notifier)
+		}
+	}
+
 	svc.transport.LinkManager().SetDefaultInboundDataHandler(svc.onLinkData)
 	svc.transport.LinkManager().SetResourceAssembledHandler(svc.onResourceAssembled)
 

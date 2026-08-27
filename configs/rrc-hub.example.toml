@@ -158,6 +158,31 @@ max_known_peers = 2048         # (default 2048)
 max_pending_mentions = 20      # per peer (default 20)
 mention_snippet_bytes = 140    # how much of the message a notification quotes (default 140)
 
+# Actually reach people who are offline, rather than only telling them
+# on their next visit.
+#
+# A held mention is not a notification: nothing tells the person to come
+# and look. With mention_lxmf on, the hub hands waiting mentions to an
+# LXMF propagation node, where the recipient's own client (Sideband,
+# MeshChat, NomadNet, the mobile app) collects them on its next sync and
+# surfaces them like any other message. No RRC client changes.
+#
+# The address is derived from the public key the peer proved when it
+# last connected, so nobody has to register anything. This assumes a
+# peer uses the same identity for RRC and for LXMF — true of
+# reticulum-mobile-app, not guaranteed in general. When delivery fails
+# the mention simply stays queued for their next RRC session.
+#
+# Requires mention_notify = true.
+mention_lxmf = false
+
+# Pin a propagation node by its lxmf.propagation destination hash (32
+# hex characters). Unset = auto-select the longest-known node that is
+# currently accepting. Pin one when you actually know one — your own
+# node, or your community's — since a pinned node is a trust decision
+# the hub will not quietly fall back from.
+lxmf_propagation_node = ""
+
 [hub.limits]
 # Client-facing limits advertised in WELCOME and enforced hub-side.
 max_nick_bytes = 32                  # (default 32)
