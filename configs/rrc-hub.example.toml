@@ -13,14 +13,24 @@
 # Display name shown to clients in the WELCOME message. (default "RRC Hub")
 name = "RRC Hub"
 
-# Software version string advertised in WELCOME. (default "rrc-hub-go/0.1.0")
-version = "rrc-hub-go/0.1.0"
+# Software version string advertised in WELCOME. (default "rrc-hub-go/0.2.0")
+version = "rrc-hub-go/0.2.0"
 
 # Optional message-of-the-day, delivered as NOTICE(s) right after
 # WELCOME. Text over 512 bytes is sent as an RNS Resource when resource
 # transfer is enabled, otherwise chunked into MTU-sized NOTICEs. Leave
 # empty to disable. (default "")
-greeting = "Welcome to the hub. Use /join <room> in your client to start chatting."
+# The default says what this hub is, because it is not what someone
+# connecting will assume: history arrives as ordinary replayed messages
+# and a mention notification arrives somewhere else entirely, so both are
+# invisible unless you know to look. Replace it with your own words —
+# just keep telling people what they can do here.
+greeting = """
+Welcome. This is rrc-hub by thatSFguy - RRC, plus some things a standard hub does not do:
+  - rooms open with the recent conversation, not a blank screen
+  - name someone with @nick while they are away and the hub delivers it to their LXMF inbox, so they actually find out
+None of it needs a special client - your existing one already speaks everything used here.
+/join #lobby to start, /help for commands."""
 
 # Where the hub's long-term Reticulum identity is stored. Created on
 # first run if it does not exist. The destination hash clients add is

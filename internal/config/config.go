@@ -182,8 +182,15 @@ func (d Duration) MarshalText() ([]byte, error) {
 func defaults() Config {
 	return Config{
 		Hub: HubConfig{
-			Name:                          "RRC Hub",
-			Version:                       "rrc-hub-go/0.2.0",
+			Name:    "RRC Hub",
+			Version: "rrc-hub-go/0.2.0",
+			// Says what this hub is, because it is not what a client
+			// connecting to it will assume. Everything named here is
+			// invisible until you know to look for it: history arrives
+			// as ordinary replayed messages and a mention notification
+			// arrives somewhere else entirely. Operators are expected
+			// to replace this with their own words.
+			Greeting:                      "Welcome. This is rrc-hub by thatSFguy - RRC, plus some things a standard hub does not do:\n  - rooms open with the recent conversation, not a blank screen\n  - name someone with @nick while they are away and the hub delivers it to their LXMF inbox, so they actually find out\nNone of it needs a special client - your existing one already speaks everything used here.\n/join #lobby to start, /help for commands.",
 			IdentityPath:                  "hub_identity",
 			DestName:                      "rrc.hub",
 			AnnounceOnStart:               true,
