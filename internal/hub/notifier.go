@@ -42,6 +42,18 @@ import (
 // a successful direct send.
 var ErrDeliveredUnconfirmed = errors.New("hub: notification sent without a receipt")
 
+// ErrNotifierUnavailable reports that the notifier had no route to even
+// attempt — not that an attempt failed.
+//
+// The distinction is worth a sentinel because the hub throttles pushes
+// per peer at mentionPushInterval, and it sets that throttle BEFORE
+// trying. Without this, a notifier that could not lift a finger — no
+// propagation node discovered yet, the transport still coming up —
+// spends the peer's next half hour anyway. That is the normal state of
+// a hub for the first couple of minutes after it starts, which is
+// exactly when a mention seeded from disk gets its first attempt.
+var ErrNotifierUnavailable = errors.New("hub: notifier had no route to attempt")
+
 // OfflineNotifier delivers a message to a peer the hub cannot reach over
 // RRC, addressed by the public key that peer proved when it last
 // identified.
@@ -176,9 +188,20 @@ func (h *Hub) pushPendingMentions() {
 				push.count, push.idHex[:8], err)
 			continue
 		}
+		if errors.Is(err, ErrNotifierUnavailable) {
+			// Nothing was attempted, so nothing has been spent: release
+			// the throttle and let the next prune tick try again rather
+			// than parking the mention for a full push interval.
+			h.mu.Lock()
+			delete(h.lastPush, push.idHex)
+			h.mu.Unlock()
+			h.log.Printf("mentions: no route to %s… yet (%d pending, will retry next tick): %v",
+				push.idHex[:8], push.count, err)
+			continue
+		}
 		if err != nil {
 			// Expected often enough not to be noise at the default level:
-			// no node reachable, or a peer whose LXMF identity differs
+			// an unreachable peer, or one whose LXMF identity differs
 			// from their RRC one.
 			h.log.Printf("mentions: could not reach %s… over LXMF (%d pending, staying queued): %v",
 				push.idHex[:8], push.count, err)

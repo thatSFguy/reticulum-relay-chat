@@ -246,7 +246,11 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 	// several nodes rather than one.
 	nodes := n.nodes.Select(n.fanout)
 	if len(nodes) == 0 {
-		return fmt.Errorf("%w (direct also failed: %v)", ErrNoPropagationNode, directErr)
+		// Neither route could be attempted. Say so distinctly: the hub
+		// releases its per-peer throttle for this case instead of
+		// spending half an hour on an attempt that never happened.
+		return fmt.Errorf("%w: %v (direct also failed: %v)",
+			hub.ErrNotifierUnavailable, ErrNoPropagationNode, directErr)
 	}
 	var uploaded int
 	var lastErr error

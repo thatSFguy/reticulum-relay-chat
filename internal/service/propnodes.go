@@ -249,23 +249,40 @@ func (p *propNodes) Select(want int) [][]byte {
 	}
 	now := p.now()
 
-	p.mu.Lock()
+	// Snapshot first, then consult the transport. Recall takes the
+	// Transport's own lock, and reaching for it while holding p.mu would
+	// pin a lock ordering (ours, then the library's) that only holds
+	// because announce handlers happen to be dispatched unlocked today —
+	// an invariant in somebody else's package, unenforced and one commit
+	// from changing.
 	type candidate struct {
 		hash []byte
 		tier int
 		age  time.Time
 	}
 	var candidates []candidate
+	p.mu.Lock()
 	for _, n := range p.nodes {
 		if !n.usable ||
 			now.Sub(n.lastHeard) > nodeStaleAfter ||
 			now.Sub(n.firstHeard) < nodeMinAge {
 			continue
 		}
-		// The announce cache is the authority on the CURRENT parameters:
-		// our own record can be a stale copy if the entry was evicted and
-		// relearned, and SendPropagated reads the cache, not this map.
-		known := p.transport.Recall(n.destHash)
+		candidates = append(candidates, candidate{
+			hash: append([]byte(nil), n.destHash...),
+			tier: tierOf(n, now),
+			age:  n.firstHeard,
+		})
+	}
+	p.mu.Unlock()
+
+	// The announce cache is the authority on a node's CURRENT
+	// parameters: our own record can be a stale copy if the entry was
+	// evicted and relearned, and SendPropagated reads the cache, not
+	// this map.
+	usable := candidates[:0]
+	for _, c := range candidates {
+		known := p.transport.Recall(c.hash)
 		if known == nil {
 			continue
 		}
@@ -276,13 +293,9 @@ func (p *propNodes) Select(want int) [][]byte {
 		if ok, _ := acceptable(info); !ok {
 			continue
 		}
-		candidates = append(candidates, candidate{
-			hash: append([]byte(nil), n.destHash...),
-			tier: tierOf(n, now),
-			age:  n.firstHeard,
-		})
+		usable = append(usable, c)
 	}
-	p.mu.Unlock()
+	candidates = usable
 
 	// Best tier first; within a tier, the node known longest.
 	for i := 1; i < len(candidates); i++ {
