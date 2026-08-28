@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/thatSFguy/reticulum-go/lxmf"
@@ -18,45 +17,62 @@ import (
 //
 // RRC has no store-and-forward, so a hub that wants to tell somebody
 // something after they disconnect has to leave it somewhere they will
-// look. LXMF propagation nodes are exactly that — a node holds a message
-// until the recipient's own client syncs — and the recipient's client is
-// one they already run, so nothing here asks anyone to install or update
-// anything.
+// look. Their LXMF client is that somewhere, and it is one they already
+// run — nothing here asks anyone to install or update anything.
 //
-// The address comes free. A §6.6 LINKIDENTIFY carries the peer's full
+// The address comes free. A §6.7.6 LINKIDENTIFY carries the peer's full
 // public key, and an RNS destination hash is a pure function of that key
 // and a name, so the hub can compute where the peer's LXMF client
 // listens without an announce, a lookup, or a registration step. See
 // internal/lxmfaddr.
 //
-// The assumption is that the peer drives RRC from the same identity its
-// LXMF client uses. That holds for reticulum-mobile-app, whose engine
-// feeds one identity to both, but it is a property of a client rather
-// than of the protocol — so a failure here is ordinary, and the hub
-// keeps the mention queued for delivery over RRC instead.
+// TWO ROUTES, IN THIS ORDER.
+//
+// 1. Direct. The message goes to the peer's lxmf.delivery destination
+//    and the call blocks for the recipient's own §6.5 delivery proof.
+//
+// 2. Propagation. The message is left with a store-and-forward node,
+//    which holds it until the peer's client next syncs.
+//
+// Order matters more than it looks. "Not connected to the room" is not
+// "off the mesh": an RRC client is a foreground app somebody closes,
+// while their LXMF client is a background service on the same device
+// that keeps announcing. In the live test that motivated this, the
+// recipient's lxmf.delivery destination announced at ONE HOP throughout
+// the entire session — the phone was right there — and the hub sent to
+// a propagation node anyway, because propagation was the only route it
+// had. Nothing arrived.
+//
+// The routes also differ in what success means, and the difference is
+// the whole reason this file is careful. A propagation upload is
+// acknowledged by the NODE; it says nothing about the recipient, who
+// may never sync from that node (see propnodes.go). A direct send is
+// acknowledged by the RECIPIENT'S OWN STACK. It is the only signal on
+// either route that means the message actually landed, which is why it
+// is tried first and why only it clears the mention outright.
 
 // ErrNoPropagationNode is returned when no usable node is known yet.
 var ErrNoPropagationNode = errors.New("no propagation node available")
 
-// nodeMinAge is how long a freshly-heard node must have been known
-// before auto-selection will use it. A node announced seconds ago has
-// not proved anything; preferring one we have held for a while biases
-// toward nodes that are actually stable.
-const nodeMinAge = 2 * time.Minute
+// notifyDirectTimeouts bound one direct attempt. Both are shorter than
+// the library defaults (15s / 30s) because this runs on the hub's prune
+// loop, serially over every absent peer with something waiting: a hub
+// with a dozen departed members must not spend six minutes there. An
+// unreachable peer is the expected case, and failing fast just moves on
+// to the propagation route.
+const (
+	notifyProofTimeout    = 10 * time.Second
+	notifyLinkSendTimeout = 20 * time.Second
+)
 
-// lxmfNotifier implements hub.OfflineNotifier over LXMF propagation.
+// lxmfNotifier implements hub.OfflineNotifier over LXMF.
 type lxmfNotifier struct {
 	svc      *Service
 	delivery *lxmf.Delivery
-
-	// pinned is the operator's chosen node, or nil for auto-selection.
-	pinned []byte
-
-	mu sync.Mutex
-	// nodes are the lxmf.propagation destinations heard announcing,
-	// with when we first heard each. Auto-selection prefers the
-	// longest-known node that is currently accepting.
-	nodes map[string]time.Time
+	nodes    *propNodes
+	// fanout is how many propagation nodes one notification is left
+	// with when no node is pinned. See Config.LXMFPropagationFanout.
+	fanout int
 }
 
 // newLXMFNotifier builds the notifier and registers the hub's own LXMF
@@ -65,33 +81,39 @@ type lxmfNotifier struct {
 // Registering a delivery destination for a hub that is not an inbox may
 // look odd, but it is what makes the notification a real message rather
 // than an anonymous one: the recipient sees a sender they can reply to,
-// and their client can return a delivery proof.
+// and their client can return the delivery proof the direct route
+// depends on.
 func newLXMFNotifier(s *Service) (*lxmfNotifier, error) {
 	delivery, err := lxmf.NewDelivery(s.transport, s.identity, s.buildDeliveryAnnounce)
 	if err != nil {
 		return nil, fmt.Errorf("lxmf delivery: %w", err)
 	}
-	n := &lxmfNotifier{
-		svc:      s,
-		delivery: delivery,
-		nodes:    make(map[string]time.Time),
-	}
+	delivery.DeliveryProofTimeout = notifyProofTimeout
+	delivery.LinkSendTimeout = notifyLinkSendTimeout
+	delivery.OnError = func(err error) { s.log.Printf("lxmf: %v", err) }
 
+	var pinned []byte
 	if hexHash := strings.TrimSpace(s.cfg.Hub.LXMFPropagationNode); hexHash != "" {
-		pinned, err := hex.DecodeString(strings.TrimPrefix(strings.ToLower(hexHash), "0x"))
+		pinned, err = hex.DecodeString(strings.TrimPrefix(strings.ToLower(hexHash), "0x"))
 		if err != nil || len(pinned) != rns.IdentityHashLen {
 			return nil, fmt.Errorf("lxmf_propagation_node must be %d hex bytes", rns.IdentityHashLen)
 		}
-		n.pinned = pinned
-		s.log.Printf("lxmf: mention notifications via pinned propagation node %x", pinned)
+		s.log.Printf("lxmf: notifications direct, falling back to pinned propagation node %x", pinned)
 	} else {
-		s.log.Printf("lxmf: mention notifications via auto-selected propagation node")
+		s.log.Printf("lxmf: notifications direct, falling back to %d auto-selected propagation node(s)",
+			s.cfg.Hub.LXMFPropagationFanout)
 	}
 
+	n := &lxmfNotifier{
+		svc:      s,
+		delivery: delivery,
+		nodes:    newPropNodes(s.log, s.transport, pinned),
+		fanout:   s.cfg.Hub.LXMFPropagationFanout,
+	}
 	// Learn nodes from announces. Even a pinned node benefits: the
 	// upload needs the node's announced app_data to know whether it is
 	// accepting and what it charges.
-	s.transport.RegisterAnnounceHandler(n)
+	s.transport.RegisterAnnounceHandler(n.nodes)
 	return n, nil
 }
 
@@ -103,13 +125,12 @@ func newLXMFNotifier(s *Service) (*lxmfNotifier, error) {
 // never heard announce and holds no public key for, so it cannot verify
 // the signature — and a client configured to drop unverified messages
 // discards it in silence. It also cannot reply or return a delivery
-// proof, which is the entire reason this hub registers a delivery
-// destination rather than sending anonymously.
+// proof, which the direct route blocks on.
 //
 // The app_data is the §4.3 form: display name, and a nil stamp_cost
 // because this destination is an outbox, not an inbox — it has no
-// inbound traffic to price and asking senders to grind proof-of-work at
-// a hub that will not read their replies would be dishonest.
+// inbound traffic to price, and asking senders to grind proof-of-work
+// at a hub that will not read their replies would be dishonest.
 func (s *Service) buildDeliveryAnnounce(context byte) (*rns.Packet, error) {
 	appData, err := rns.EncodeLXMFAppData([]byte(s.cfg.Hub.Name), nil)
 	if err != nil {
@@ -141,91 +162,17 @@ func (s *Service) announceDelivery() {
 	s.log.Printf("announced lxmf.delivery (%x)", s.lxmfDest)
 }
 
-// AspectMatch selects lxmf.propagation announces.
-func (n *lxmfNotifier) AspectMatch(nameHash []byte) bool {
-	want := rns.NameHash(lxmf.PropagationFullName())
-	return len(nameHash) == len(want) && equalBytes(nameHash, want)
-}
-
-// OnAnnounce records a propagation node we have heard from.
-func (n *lxmfNotifier) OnAnnounce(a *rns.Announce) {
-	if a == nil || len(a.DestHash) != rns.IdentityHashLen {
-		return
-	}
-	key := hex.EncodeToString(a.DestHash)
-	n.mu.Lock()
-	if _, known := n.nodes[key]; !known {
-		n.nodes[key] = time.Now()
-		n.svc.log.Printf("lxmf: heard propagation node %s", key[:8])
-	}
-	n.mu.Unlock()
-}
-
-// selectNode returns the propagation node to upload through.
-//
-// A pinned node is used unconditionally — an operator who names one has
-// made a trust decision, and quietly failing over to a stranger's node
-// would undo it. Otherwise the longest-known node that is currently
-// accepting wins: uptime is the only evidence available without probing.
-func (n *lxmfNotifier) selectNode() ([]byte, error) {
-	if n.pinned != nil {
-		return n.pinned, nil
-	}
-
-	n.mu.Lock()
-	type candidate struct {
-		hash  []byte
-		since time.Time
-	}
-	var candidates []candidate
-	for key, since := range n.nodes {
-		h, err := hex.DecodeString(key)
-		if err != nil {
-			continue
-		}
-		candidates = append(candidates, candidate{hash: h, since: since})
-	}
-	n.mu.Unlock()
-
-	var best []byte
-	var bestSince time.Time
-	now := time.Now()
-	for _, c := range candidates {
-		if now.Sub(c.since) < nodeMinAge {
-			continue
-		}
-		// The announce cache carries the node's app_data; a node that is
-		// not accepting is not a candidate however long we have known it.
-		known := n.svc.transport.Recall(c.hash)
-		if known == nil {
-			continue
-		}
-		info, err := lxmf.ParsePropagationNodeAppData(known.AppData)
-		if err != nil || !info.Enabled {
-			continue
-		}
-		if best == nil || c.since.Before(bestSince) {
-			best, bestSince = c.hash, c.since
-		}
-	}
-	if best == nil {
-		return nil, ErrNoPropagationNode
-	}
-	return best, nil
-}
-
 // ensureAddressable makes sure the transport can encrypt to known's
 // destination, without discarding anything better it already holds.
 //
 // Restore overwrites a cache entry wholesale, and the entry synthesized
 // from a LINKIDENTIFY key carries a public key and nothing else — no
 // app_data, no hop count, no last-seen. app_data is the part that
-// matters: it carries the recipient's §5.7.4 stamp_cost, and
-// SendPropagated grinds a delivery stamp only when it can read one.
+// matters: it carries the recipient's §5.7.4 stamp_cost, and both send
+// routes grind a delivery stamp only when they can read one.
 // Overwriting a real announce with the stub drops that cost to zero and
 // sends an unstamped message, which a recipient enforcing stamps
-// discards silently — the hub logs a successful upload and nothing ever
-// arrives.
+// discards silently — the hub logs a success and nothing ever arrives.
 //
 // A live announce therefore always wins. It is strictly richer, and it
 // is the same key: Restore re-derives the destination from the public
@@ -258,54 +205,104 @@ func (n *lxmfNotifier) PinPeers(pubKeys [][]byte) {
 	n.svc.transport.PinDestinations(dests)
 }
 
-// NotifyAbsent uploads one notification for the peer owning pubKey to a
-// propagation node, where it waits for that peer's client to sync.
+// NotifyAbsent delivers one notification to the peer owning pubKey:
+// straight to their LXMF client if it answers, and otherwise into
+// store-and-forward to wait for them.
 func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 	known, err := lxmfaddr.KnownDelivery(pubKey)
 	if err != nil {
 		return err
 	}
-	// Teach the transport how to encrypt to this peer, but only if it
-	// does not already know it. Restore overwrites a cache entry
-	// wholesale, and the entry we synthesize here carries a public key
-	// and nothing else — no app_data, no hop count, no last-seen.
-	//
-	// app_data is the part that matters. It carries the recipient's
-	// §5.7.4 stamp_cost, and SendPropagated grinds a delivery stamp
-	// only when it can read one. Clobbering a real announce with this
-	// stub therefore drops the cost to zero and sends an unstamped
-	// message, which a recipient that enforces stamps discards without
-	// a word — the hub logs a successful upload and the notification
-	// never arrives.
-	//
-	// So a live announce always wins: it is strictly richer, and it is
-	// the same key (Restore re-derives the destination from the public
-	// key before accepting it, so a mismatch could not have been
-	// cached under this destination anyway). We fill in only for a
-	// peer the hub has never heard announce, which is precisely the
-	// case this whole path exists for.
 	ensureAddressable(n.svc.transport, known)
 
-	node, err := n.selectNode()
-	if err != nil {
-		return err
-	}
 	// Whether we can stamp depends on having heard this peer announce:
-	// the stamp_cost lives in that announce's app_data, and nothing
-	// else carries it. Decide before sending, because ensureAddressable
-	// may be about to install a stub that has none.
+	// the §5.7.4 stamp_cost lives in that announce's app_data and
+	// nothing else carries it. Decide before sending, because
+	// ensureAddressable may just have installed a stub that has none.
 	stamped := false
 	if cached := n.svc.transport.Recall(known.DestHash); cached != nil && len(cached.AppData) > 0 {
 		stamped = true
 	}
 
-	if _, err := n.delivery.SendPropagated(node, known.DestHash, []byte(title), []byte(body), nil); err != nil {
-		return fmt.Errorf("propagate to %x via %x: %w", known.DestHash[:4], node[:4], err)
+	// Route 1: direct. Blocks for the recipient's own delivery proof, so
+	// success here is end-to-end evidence and not an intermediary's
+	// opinion — the mention is genuinely delivered and the hub can drop
+	// it. The stamp caveat below does not apply: a client that enforces
+	// stamps still proofs the RNS packet before dropping the LXMF body,
+	// so an unstamped direct send can be acknowledged and then
+	// discarded, exactly as an unstamped upload can.
+	directErr := n.sendDirect(known.DestHash, title, body)
+	if directErr == nil {
+		n.svc.log.Printf("lxmf: delivered to %x directly (proof received)", known.DestHash[:4])
+		if !stamped {
+			return fmt.Errorf("%w: %x has never announced", hub.ErrDeliveredUnconfirmed, known.DestHash[:4])
+		}
+		return nil
 	}
+	n.svc.log.Printf("lxmf: direct delivery to %x failed (%v) — trying store-and-forward",
+		known.DestHash[:4], directErr)
+
+	// Route 2: store-and-forward. See propnodes.go for why this is
+	// several nodes rather than one.
+	nodes := n.nodes.Select(n.fanout)
+	if len(nodes) == 0 {
+		return fmt.Errorf("%w (direct also failed: %v)", ErrNoPropagationNode, directErr)
+	}
+	var uploaded int
+	var lastErr error
+	for _, node := range nodes {
+		_, err := n.delivery.SendPropagated(node, known.DestHash, []byte(title), []byte(body), nil)
+		n.nodes.RecordResult(node, err)
+		if err != nil {
+			lastErr = err
+			n.svc.log.Printf("lxmf: upload for %x to node %x failed: %v",
+				known.DestHash[:4], node[:4], err)
+			// A pinned node we have never heard from cannot be linked
+			// to — ask the network for its announce so a later attempt
+			// can succeed. (Auto-discovered nodes can't hit this:
+			// discovery IS an announce.)
+			if errors.Is(err, lxmf.ErrPropagationNodeUnknown) {
+				if rerr := n.svc.transport.RequestPath(node); rerr != nil {
+					n.svc.log.Printf("lxmf: path? for node %x: %v", node[:4], rerr)
+				}
+			}
+			continue
+		}
+		uploaded++
+		n.svc.log.Printf("lxmf: uploaded notification for %x to node %x",
+			known.DestHash[:4], node[:4])
+	}
+	if uploaded == 0 {
+		return fmt.Errorf("no route to %x: direct: %v; propagation: %w",
+			known.DestHash[:4], directErr, lastErr)
+	}
+	// The upload succeeded; its ACCEPTANCE did not. A node acknowledges
+	// storage, never receipt, so the mention stays queued for RRC
+	// whatever the stamp situation — the fallback is not something to
+	// spend on an acknowledgement that does not mean what we want it to
+	// mean. See hub.ErrDeliveredUnconfirmed.
 	if !stamped {
-		// The upload succeeded; its acceptance did not. See
-		// hub.ErrDeliveredUnstamped.
-		return fmt.Errorf("%w: %x has never announced", hub.ErrDeliveredUnstamped, known.DestHash[:4])
+		return fmt.Errorf("%w: %x has never announced", hub.ErrDeliveredUnconfirmed, known.DestHash[:4])
 	}
-	return nil
+	return fmt.Errorf("%w: uploaded to %d node(s), no receipt from the recipient",
+		hub.ErrDeliveredUnconfirmed, uploaded)
+}
+
+// sendDirect attempts route 1. The library picks a single opportunistic
+// packet or a Link by size, and blocks either way for the proof.
+func (n *lxmfNotifier) sendDirect(dest []byte, title, body string) error {
+	_, err := n.delivery.SendWithID(dest, []byte(title), []byte(body), nil)
+	if err == nil {
+		return nil
+	}
+	// An unknown recipient means the transport holds no route yet.
+	// ensureAddressable installed the KEY, which is what encryption
+	// needs, but a path is what routing needs — ask for one so the next
+	// attempt, thirty minutes from now, has somewhere to send.
+	if errors.Is(err, lxmf.ErrRecipientUnknown) || errors.Is(err, lxmf.ErrDeliveryProofTimeout) {
+		if rerr := n.svc.transport.RequestPath(dest); rerr != nil {
+			n.svc.log.Printf("lxmf: path? for %x: %v", dest[:4], rerr)
+		}
+	}
+	return err
 }

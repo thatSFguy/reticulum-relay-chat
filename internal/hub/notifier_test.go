@@ -344,7 +344,7 @@ func TestAFullQueueDoesNotLoseMentionsArrivingDuringAPush(t *testing.T) {
 // and the notification is simply lost.
 func TestAnUnstampedUploadKeepsTheMentionQueued(t *testing.T) {
 	h := mentionHub(t, nil)
-	h.SetOfflineNotifier(&fakeNotifier{fail: ErrDeliveredUnstamped})
+	h.SetOfflineNotifier(&fakeNotifier{fail: ErrDeliveredUnconfirmed})
 
 	id, _ := queueMentionFor(t, h, "are you there")
 	h.pushPendingMentions()

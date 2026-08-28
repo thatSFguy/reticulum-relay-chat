@@ -93,8 +93,24 @@ type HubConfig struct {
 	// where the recipient's own client collects it — the only way to
 	// reach someone whose RRC link is gone. Without it a mention still
 	// waits, but nothing tells them to come and look.
-	MentionLXMF         bool   `toml:"mention_lxmf"`
+	MentionLXMF bool `toml:"mention_lxmf"`
+	// LXMFPropagationNode pins the store-and-forward node the fallback
+	// route uses. Empty auto-selects; see internal/service/propnodes.go.
 	LXMFPropagationNode string `toml:"lxmf_propagation_node"`
+	// LXMFPropagationFanout is how many auto-selected nodes one
+	// notification is left with. Ignored when a node is pinned.
+	//
+	// More than one because the hub cannot know which node the recipient
+	// syncs from — nothing in an announce says — so a single choice out
+	// of the dozens announcing is close to a guess, and a message parked
+	// on the wrong node is never seen. Copies cost the sender airtime
+	// and cost the recipient nothing: LXMF dedupes on message_id, so a
+	// message that arrives twice is shown once.
+	//
+	// Kept small deliberately. This is the FALLBACK route, reached only
+	// after direct delivery has already failed, and each copy is its own
+	// link handshake and transfer to a different node.
+	LXMFPropagationFanout int `toml:"lxmf_propagation_fanout"`
 
 	Limits LimitsConfig `toml:"limits"`
 }
@@ -175,6 +191,7 @@ func defaults() Config {
 			MaxPendingMentions:             20,
 			MentionSnippetBytes:            140,
 			MentionLXMF:                    false,
+			LXMFPropagationFanout:          2,
 			Limits: LimitsConfig{
 				MaxNickBytes:        32,
 				MaxRoomNameBytes:    64,
@@ -267,7 +284,20 @@ func applyMentionDefaults(h *HubConfig) {
 	if h.MentionSnippetBytes <= 0 {
 		h.MentionSnippetBytes = d.MentionSnippetBytes
 	}
+	if h.LXMFPropagationFanout <= 0 {
+		h.LXMFPropagationFanout = d.LXMFPropagationFanout
+	}
+	// A hub that fanned out to every node it has heard would be a
+	// broadcast amplifier with its own return address on it, on a mesh
+	// where announces are free and unauthenticated.
+	if h.LXMFPropagationFanout > maxPropagationFanout {
+		h.LXMFPropagationFanout = maxPropagationFanout
+	}
 }
+
+// maxPropagationFanout caps lxmf_propagation_fanout however it is
+// configured.
+const maxPropagationFanout = 5
 
 func applyLimitDefaults(l *LimitsConfig) {
 	if l.MaxNickBytes <= 0 {

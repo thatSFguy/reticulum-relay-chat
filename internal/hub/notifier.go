@@ -23,18 +23,24 @@ import (
 // reach an absent peer given their public key. internal/service
 // implements that against LXMF.
 
-// ErrDeliveredUnstamped reports an upload that reached a propagation
-// node but could not be proof-of-work stamped, because the hub has
-// never heard the recipient announce and so does not know their §5.7.4
-// stamp_cost.
+// ErrDeliveredUnconfirmed reports a notification that went out but
+// carries no evidence the recipient received it. The notifier did its
+// job; what is missing is a receipt.
 //
-// Such a message is deliverable to a recipient that does not enforce
-// stamps and is discarded in silence by one that does — and the hub
-// cannot tell which, because a propagation upload is acknowledged by
-// the NODE, never by the recipient. So the mention stays queued for RRC
-// rather than being dropped: at worst the peer sees it twice, which is
-// a far better failure than the notification vanishing.
-var ErrDeliveredUnstamped = errors.New("hub: notification uploaded without a stamp")
+// Two things produce it. A store-and-forward upload is acknowledged by
+// the NODE, never by the recipient — who may not sync from that node at
+// all. And a message the hub could not proof-of-work stamp, because it
+// has never heard the recipient announce and so does not know their
+// §5.7.4 stamp_cost, is deliverable to a recipient that ignores stamps
+// and discarded in silence by one that enforces them — and nothing
+// tells the hub which it is dealing with.
+//
+// Either way the mention stays queued, so the RRC path remains the
+// fallback: at worst the peer sees it twice, which is a far better
+// failure than the notification vanishing. A mention is dropped only
+// against a receipt from the recipient's own stack, which today means
+// a successful direct send.
+var ErrDeliveredUnconfirmed = errors.New("hub: notification sent without a receipt")
 
 // OfflineNotifier delivers a message to a peer the hub cannot reach over
 // RRC, addressed by the public key that peer proved when it last
@@ -163,11 +169,11 @@ func (h *Hub) pushPendingMentions() {
 
 	for _, push := range batch {
 		err := n.NotifyAbsent(push.pubKey, push.title, push.body)
-		if errors.Is(err, ErrDeliveredUnstamped) {
-			// Uploaded, but we could not prove it will be accepted.
-			// Keep it queued so the RRC path remains a fallback.
-			h.log.Printf("mentions: uploaded %d notification(s) to %s… unstamped (no announce heard); keeping them queued for RRC",
-				push.count, push.idHex[:8])
+		if errors.Is(err, ErrDeliveredUnconfirmed) {
+			// Sent, but nothing proves it was received. Keep it queued
+			// so the RRC path remains a fallback.
+			h.log.Printf("mentions: sent %d notification(s) to %s… but got no receipt (%v); keeping them queued for RRC",
+				push.count, push.idHex[:8], err)
 			continue
 		}
 		if err != nil {
