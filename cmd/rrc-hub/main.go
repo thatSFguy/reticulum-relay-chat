@@ -41,6 +41,13 @@ func main() {
 		logger.Fatalf("%v", err)
 	}
 
+	// Advertise the real build version in WELCOME unless the operator
+	// set their own string. Keeps the number in one place — the git tag
+	// — rather than a constant somebody has to remember to bump.
+	if cfg.Hub.Version == config.DefaultVersion {
+		cfg.Hub.Version = config.VersionPrefix + version
+	}
+
 	// Apply CLI overrides only for flags the operator actually set, so an
 	// unset flag never clobbers a configured value.
 	flag.Visit(func(f *flag.Flag) {

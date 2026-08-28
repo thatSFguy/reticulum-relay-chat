@@ -183,7 +183,7 @@ func defaults() Config {
 	return Config{
 		Hub: HubConfig{
 			Name:    "RRC Hub",
-			Version: "rrc-hub-go/0.2.0",
+			Version: DefaultVersion,
 			// Says what this hub is, because it is not what a client
 			// connecting to it will assume. Everything named here is
 			// invisible until you know to look for it: history arrives
@@ -380,3 +380,16 @@ func applyLimitDefaults(l *LimitsConfig) {
 // them. The defaults are part of the product — several features only
 // work if they are right — and nothing else can check that.
 func DefaultsForTest() HubConfig { return defaults().Hub }
+
+// VersionPrefix and DefaultVersion are the software version advertised
+// to clients in WELCOME.
+//
+// DefaultVersion is a sentinel rather than a literal: cmd/rrc-hub
+// replaces it with the real build version (set by -ldflags at release
+// time) unless the operator configured their own string. Hardcoding the
+// number here meant remembering to bump it on every tag, and it was
+// already wrong once — a 0.2.0 build advertising 0.1.0.
+const (
+	VersionPrefix  = "rrc-hub-go/"
+	DefaultVersion = VersionPrefix + "dev"
+)
