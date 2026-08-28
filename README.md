@@ -1,135 +1,299 @@
-# reticulum-relay-chat
+# rrc-hub
 
-A pure-Go **Reticulum Relay Chat (RRC) hub** — the server side of an
-IRC-style chat protocol layered on the [Reticulum](https://reticulum.network/)
-network. Clients open a single Reticulum Link to the hub, identify, and
-exchange CBOR-encoded envelopes; the hub relays room chat between them.
+**An RRC hub that can reach you when you are not there.**
 
-RRC protocol: <https://rrc.kc1awv.net/>. The reference hub is
-[`kc1awv/rrcd`](https://github.com/kc1awv/rrcd) (Python); this is an
-independent Go implementation.
+[Reticulum Relay Chat](https://rrc.kc1awv.net/) is IRC-style rooms over
+the [Reticulum](https://reticulum.network/) mesh. A normal RRC hub relays
+what is said between the people currently connected, and that is all —
+close the app and the conversation happens without you, silently and
+irrecoverably.
 
-## What it does
+This one is a superset. It keeps a transcript so a room reads as a
+conversation already in progress, and when somebody names you while you
+are gone it **sends you a direct message in the LXMF client you already
+use** — Sideband, MeshChat, the mobile app — with no registration step
+and no change to any client.
 
-This hub targets feature parity with the reference Python hub `rrcd`.
+It is a pure-Go, single-binary implementation with no runtime
+dependencies, and it runs on a Raspberry Pi Zero.
 
-- Announces an `rrc.hub` destination on the attached Reticulum network
-  (`name_hash = SHA-256("rrc.hub")[:10] = ac9fd3a81e4036f86e1d`).
-- Accepts inbound Reticulum Links, completing the LINKREQUEST → LRPROOF
-  handshake, and binds each client's verified identity from its §6.6
-  LINKIDENTIFY.
-- Speaks the RRC envelope protocol: `HELLO`/`WELCOME`, `JOIN`/`JOINED`,
-  `PART`/`PARTED`, `MSG`/`NOTICE`/`ACTION` fan-out, `PING`/`PONG`,
-  `ERROR`, and `RESOURCE_ENVELOPE` for large payloads.
-- Rewrites every relayed message's `K_SRC` to the link-verified identity
-  hash, so a client can never spoof another's messages.
-- Enforces hub-advertised limits and a per-session token-bucket rate
-  limit.
-- **Room modes** — `+m` moderated, `+i` invite-only, `+k` keyed, `+p`
-  private, `+t` topic-locked, `+n` no-outside-messages, `+r` registered,
-  plus per-user `+o`/`+v` (op/voice).
-- **Room history (optional)** — with `history_enabled`, the hub keeps a
-  bounded, expiring transcript per room (seven days by default) and
-  replays the last few messages to a joining client, so a room reads as
-  a conversation in progress rather than an empty screen. `/history`
-  asks for more; `/history purge <room>` drops it. Replayed messages are
-  the original envelopes — same id, same timestamp — bracketed by
-  ordinary NOTICEs, so **no client change is required**. Off by default:
-  retaining plaintext conversation on disk is the operator's call.
-- **Mention notifications (optional)** — with `mention_notify`, a message
-  naming someone (`@alice`, or `@` plus 6+ hex of their identity hash)
-  reaches them even if they were not in the room: immediately if they
-  are connected elsewhere, held for their return if they are not.
-  Ambiguous nicknames notify nobody — RRC nicks are advisory and not
-  unique, so the hub declines rather than guessing. `/notify off` opts
-  out. Off by default.
-- **Offline delivery over LXMF (optional)** — with `mention_lxmf`, a
-  waiting mention is handed to an LXMF propagation node, where the
-  recipient's own client (Sideband, MeshChat, the mobile app) collects
-  it on its next sync. The address is derived from the public key the
-  peer proved over §6.6 LINKIDENTIFY, so nobody registers anything and
-  no client changes. Delivery failure is expected and harmless: the
-  mention stays queued for their next RRC session.
-- **Slash commands** — `/list`, `/who`, `/topic`, `/mode`, `/kick`,
-  `/op`/`/deop`/`/voice`/`/devoice`, `/ban`, `/invite`, `/history`,
-  `/notify`, `/register`/
-  `/unregister`, and the operator commands `/stats`, `/reload`, `/kline`.
-- **Operator / trust model** — `trusted_identities` server operators,
-  server-wide klines, room founders, and per-room bans/invites.
-- **Persistence** — registered rooms and klines survive restarts
-  (`rooms.toml` and a kline file); a prune loop expires stale rooms.
-- **Hub-initiated PING** keepalive with PONG-timeout link teardown.
+---
+
+## The one rule that shapes everything here
+
+**Deployed clients cannot be modified.** Every feature below is built out
+of things existing RRC clients already understand, or it does not ship.
+
+That constraint is why this works at all. Replayed history is the
+*original envelopes* re-sent — same message id, same timestamp — bracketed
+by ordinary NOTICEs. Slash commands are ordinary MSG bodies. Offline
+notifications ride LXMF, a protocol your client already speaks for other
+reasons. A feature a client would have to be taught is a feature nobody
+can use, so there are none.
+
+---
+
+## What it does that other hubs do not
+
+### Offline mention notifications
+
+Someone writes `@alice check this` in a room. Alice closed the app an
+hour ago.
+
+The hub notices the mention, sees Alice is not there, and sends the
+notification to **her LXMF delivery destination** — the inbox her normal
+messaging client is already listening on. It arrives as a real message
+from a sender she can reply to.
+
+Nobody registered anything. The address is a pure function of the public
+key Alice proved when she last connected (SPEC §6.7.6 LINKIDENTIFY), and
+an RNS destination hash is derived from that key and a name — so the hub
+can compute where her client listens without a lookup, a directory, or a
+protocol change.
+
+Two routes are tried, and the difference between them matters:
+
+1. **Direct** — straight to her delivery destination, blocking for *her
+   own* §6.5 delivery proof. Success here is end-to-end evidence, and it
+   is the common case: leaving a room is not leaving the mesh. An RRC
+   client is a foreground app you close; your LXMF client is a background
+   service on the same device that keeps announcing.
+2. **Store-and-forward** — left with LXMF propagation nodes, held until
+   her client next syncs.
+
+Only the direct route clears a mention, because only it proves anything.
+A propagation upload is acknowledged by the *node*, never the recipient —
+so an uploaded mention **stays queued**, and is delivered over RRC on her
+next visit regardless. The worst case is seeing it twice; the failure
+this design refuses is seeing it never.
+
+Resolution is deliberately conservative. RRC nicknames are advisory,
+self-asserted and not unique, so `@alice` does not identify anyone on its
+own. The hub resolves by hash prefix, then by nickname in the room, then
+by nickname in its directory of people who have been here before — and
+declines on ambiguity. A mention delivered to the wrong person is worse
+than one delivered to nobody: it sends someone else's conversation to a
+stranger.
+
+### Room history and replay
+
+With `history_enabled`, the hub keeps a bounded, expiring transcript per
+room and replays the last few messages to anyone joining, so a room opens
+as a conversation in progress rather than a blank screen. `/history` asks
+for more.
+
+Retaining plaintext conversation on disk is the operator's decision, so
+it is off by default.
+
+### A lobby that is already there
+
+A brand new hub used to be an empty prompt: no rooms, `/list` reporting
+nothing, and the only way forward was already knowing that JOIN creates a
+room by name. `default_rooms` (default `["lobby"]`) means the first person
+to connect has somewhere to be.
+
+### Everything a normal RRC hub does
+
+Full parity with the reference Python hub
+[`rrcd`](https://github.com/kc1awv/rrcd): `HELLO`/`WELCOME`,
+`JOIN`/`PART`, `MSG`/`NOTICE`/`ACTION` fan-out, `PING`/`PONG`, `ERROR`,
+RNS Resource transfer for large payloads; room modes (`+m` `+i` `+k` `+p`
+`+t` `+n` `+r`, per-user `+o`/`+v`); `/list` `/who` `/topic` `/mode`
+`/kick` `/ban` `/invite` `/register` and operator `/stats` `/reload`
+`/kline`; server operators, klines, room founders, per-room bans and
+invites; registered rooms and klines surviving restarts.
+
+Every relayed message's `K_SRC` is rewritten to the link-verified
+identity, so a client cannot spoof another's messages.
+
+---
+
+## Deploy it
+
+### 1. Get a binary
+
+Download from [Releases](https://github.com/thatSFguy/reticulum-relay-chat/releases).
+Static, no dependencies, no runtime to install:
+
+| Target | Asset |
+|---|---|
+| Linux x86-64 | `rrc-hub-linux-amd64` |
+| Raspberry Pi 3/4/5 (64-bit OS) | `rrc-hub-linux-arm64` |
+| Raspberry Pi 2/3/4 (32-bit OS) | `rrc-hub-linux-armv7` |
+| Raspberry Pi 1 / Zero / Zero W | `rrc-hub-linux-armv6` |
+| Windows x86-64 | `rrc-hub-windows-amd64.exe` |
+
+```sh
+chmod +x rrc-hub-linux-arm64
+```
+
+Or build it yourself — Go 1.26+, no cgo:
+
+```sh
+go build -o rrc-hub ./cmd/rrc-hub
+```
+
+### 2. Write a config
+
+```sh
+curl -O https://raw.githubusercontent.com/thatSFguy/reticulum-relay-chat/master/configs/rrc-hub.example.toml
+mv rrc-hub.example.toml rrc-hub.toml
+```
+
+The example file documents every knob. A minimal hub with the
+interesting features on:
+
+```toml
+[hub]
+name = "my-hub"
+greeting = "Welcome. /join #lobby to start, /help for commands."
+identity_path = "hub_identity"
+
+# A room to arrive in (default; set to [] for none)
+default_rooms = ["lobby"]
+
+# Rooms read as a conversation in progress
+history_enabled = true
+
+# Tell people they were named while they were away
+mention_notify = true
+mention_lxmf   = true
+
+[[interfaces]]
+type = "tcp_client"
+address = "your.reticulum.node:7822"     # any RNS transport node
+```
+
+> **Pin a propagation node if you know one.** With
+> `lxmf_propagation_node` unset the hub auto-selects, and it cannot know
+> which node your users' clients actually sync from — a message left on
+> the wrong one is never collected. The direct route does not care, and
+> handles most deliveries anyway.
+
+### 3. Run it
+
+```sh
+./rrc-hub -config rrc-hub.toml
+```
+
+On first run it generates a long-term Reticulum identity at
+`identity_path` — **back that file up**, it is the hub's address. Startup
+logs the destination hash:
+
+```
+RRC hub running — add this hub in a client by hash: 4252d9d9…
+```
+
+Paste that into an RRC client (the Rooms tab of `reticulum-mobile-app`,
+for instance) and you are connected.
+
+### 4. Keep it running
+
+```ini
+# /etc/systemd/system/rrc-hub.service
+[Unit]
+Description=RRC hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=rrc
+WorkingDirectory=/var/lib/rrc-hub
+ExecStart=/usr/local/bin/rrc-hub -config /var/lib/rrc-hub/rrc-hub.toml
+Restart=always
+RestartSec=5
+# State is a few small files next to the config
+StateDirectory=rrc-hub
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl enable --now rrc-hub
+journalctl -fu rrc-hub
+```
+
+The hub reconnects its own uplink, so a transport node restart, a NAT
+timeout, or a dropped TCP connection recovers without help.
+
+---
+
+## Operating notes
+
+**Keepalive must stay on.** `ping_interval` (30s) and `ping_timeout`
+(60s) are what let the hub notice that somebody has gone. Set either to
+`0` and it never learns, lists departed peers as present in rooms
+forever, and mention notification stops working entirely — the people
+most in need of an offline notification are precisely the ones the hub
+would still believe were in the room.
+
+**The announce cache is in memory only.** After a restart the hub knows
+nobody, so the first delivery attempt to a given peer may fail while it
+requests a path. It retries promptly rather than waiting out
+`mention_push_interval`.
+
+**Registered vs ephemeral rooms.** An unregistered room dies with its
+last member, and a later room of the same name starts with a clean
+transcript — that is RRC's contract. `/register` a room if you want its
+history to survive everyone leaving. `default_rooms` are registered for
+exactly this reason. Note `/unregister` does not purge a transcript; use
+`/history purge`.
+
+---
+
+## Verified against real clients
+
+A green test suite says the logic is self-consistent. It says nothing
+about whether a real client can connect or a notification arrives, and
+this project has been bitten by that repeatedly — several bugs where the
+hub logged a *successful* outcome while nothing reached anyone.
+
+So the paths that matter are exercised live on a public mesh, against
+stock upstream **RNS 1.5.0 + LXMF 1.1.1** (the stack Sideband and the
+mobile client are built on) as well as the Android client:
+
+- link handshake, §6.7.6 LINKIDENTIFY, identity binding
+- `HELLO`/`WELCOME`, `/list`, `JOIN`, history replay
+- mention detection, queueing while absent, address derivation
+  (cross-checked: the address the hub computes equals the one the
+  recipient's own client computes for itself)
+- **direct LXMF notification, delivered and signature-verified in a real
+  client's inbox**
+- propagation upload, node selection, and the retry behaviour around a
+  cold announce cache
+
+Not yet verified live: inbound RNS Resource reassembly from a client.
+
+Store-and-forward retrieval is not something the hub can guarantee — some
+propagation nodes accept an upload and then serve nothing back, to us and
+to stock upstream LXMF alike. That is why an upload never clears a
+mention.
+
+---
 
 ## Layout
 
 ```
 cmd/rrc-hub/        main() — flags, config load, signal handling
 internal/
-  rrc/              RRC wire protocol — CBOR envelope, constants,
-                    message builders (ported from the verified Kotlin
-                    implementation in reticulum-mobile-app)
-  hub/              transport-agnostic hub: rooms, sessions, router,
-                    modes, slash commands, fan-out, background loops —
-                    driven through a Link interface
-  roomreg/          rooms.toml + kline TOML persistence
+  rrc/              RRC wire protocol — CBOR envelope, constants, builders
+  hub/              transport-agnostic hub: rooms, sessions, router, modes,
+                    slash commands, fan-out, mentions, background loops
+  roomreg/          rooms.toml + kline persistence
   history/          bounded, expiring per-room transcript store
   peerreg/          peers.toml — known identities, keys, pending mentions
-  lxmfaddr/         derives a peer's LXMF delivery address from its key
-  service/          wires the hub to a live Reticulum stack: identity,
-                    TCP attach, rrc.hub destination, announce, link
-                    routing, RNS Resource transfer, dead-link janitor
+  lxmfaddr/         derives a peer's LXMF address from its verified key
+  service/          wires the hub to a live Reticulum stack; LXMF notifier
+                    and propagation-node selection
   config/           TOML configuration loader
-configs/            example configuration
+configs/            documented example configuration
 ```
 
-The Reticulum protocol stack — identity, packet, link, crypto,
-announce, TCP/HDLC transport, Resource transfer — comes from
-[`reticulum-go`](https://github.com/thatSFguy/reticulum-go)
-(`github.com/thatSFguy/reticulum-go/rns`), the pure-Go RNS/LXMF module
-shared with `reticulum-group-chat`. It was previously vendored here as
-`internal/rns`; that copy has been removed in favor of the module, so
-stack fixes and interop test coverage are shared rather than
-forward-ported by hand. The module also carries an `lxmf` package
-(messages, delivery, propagation-node store-and-forward), which this
-hub does not use yet.
-
-## Build & run
-
-```sh
-go build ./...
-go test ./...
-go build -o build/rrc-hub ./cmd/rrc-hub
-
-cp configs/rrc-hub.example.toml rrc-hub.toml   # then edit
-./build/rrc-hub -config rrc-hub.toml
-```
-
-On first run the hub generates a long-term Reticulum identity at the
-configured `identity_path`. It logs its destination hash on startup:
-
-```
-RRC hub running — add this hub in a client by hash: <32 hex chars>
-```
-
-Paste that hash into an RRC client (e.g. the Rooms tab of
-reticulum-mobile-app) to connect.
-
-## Status
-
-The RRC protocol layer, the hub room/session/command/mode logic, and
-the TOML persistence layer are unit-tested (`internal/rrc`,
-`internal/hub`, `internal/roomreg`). Behavior tracks the reference hub
-`rrcd`; where `rrcd` and the published RRC spec diverge, `rrcd` is
-followed (see `AGENTS.md`).
-
-`internal/service` wires the hub to the responder side of the
-`reticulum-go` link layer, which has not yet been exercised end-to-end
-against a live client — that stack was written for an LXMF *initiator*,
-so the responder-link path is the part most in need of live interop
-verification. The LXMF mention path in `internal/service/lxmfnotify.go`
-is likewise unverified against a live propagation node: the store it
-draws from, the addressing, and the hub-side push logic are unit-tested,
-but the upload itself has only `reticulum-go`'s own interop coverage
-behind it. RNS Resource transfer is wired in both directions
-(outbound send, inbound reassembly routed by `link_id`) but is likewise
-unverified against a live client.
+The Reticulum stack — identity, packet, link, crypto, announce, TCP/HDLC
+transport, Resource transfer, and the LXMF layer this hub's notifications
+ride on — comes from
+[`reticulum-go`](https://github.com/thatSFguy/reticulum-go), shared with
+`reticulum-group-chat`. Requires **v0.5.0 or later**: earlier versions
+discard link context `0xFB`, so no client can identify and the hub is
+unusable.

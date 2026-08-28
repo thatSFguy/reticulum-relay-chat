@@ -183,7 +183,7 @@ func defaults() Config {
 	return Config{
 		Hub: HubConfig{
 			Name:                          "RRC Hub",
-			Version:                       "rrc-hub-go/0.1.0",
+			Version:                       "rrc-hub-go/0.2.0",
 			IdentityPath:                  "hub_identity",
 			DestName:                      "rrc.hub",
 			AnnounceOnStart:               true,
