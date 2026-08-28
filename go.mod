@@ -5,7 +5,7 @@ go 1.26.1
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/fxamacker/cbor/v2 v2.7.0
-	github.com/thatSFguy/reticulum-go v0.3.1
+	github.com/thatSFguy/reticulum-go v0.5.0
 )
 
 require (

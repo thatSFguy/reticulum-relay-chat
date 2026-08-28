@@ -3,53 +3,57 @@ package service
 import (
 	"bytes"
 	"testing"
+
+	"github.com/thatSFguy/reticulum-go/rns"
 )
 
-// TestParseIdentifyFrame pins the two accepted §6.6 LINKIDENTIFY
-// payload layouts — the 128-byte upstream RNS form (public_key||sig,
-// what a spec-compliant client such as the Python RRC desktop client
-// sends) and the 144-byte legacy form some older reticulum-mobile-app
-// builds still send — plus the rejections.
-func TestParseIdentifyFrame(t *testing.T) {
-	linkID := bytes.Repeat([]byte{0xAB}, 16)
-	pub := bytes.Repeat([]byte{0x11}, 64)
-	sig := bytes.Repeat([]byte{0x22}, 64)
+// The §6.7.6 frame layout is parsed and verified inside reticulum-go
+// now (see the note above bindPeer), so RRC no longer slices it. What
+// still has to hold at this boundary is the shape RRC depends on: the
+// upstream 128-byte body is public_key(64) || signature(64), and the
+// signature covers link_id || public_key — NOT link_id alone, which is
+// the mistake §6.7.6 calls out by name.
+//
+// Pinned here rather than left to the library because it is the
+// contract RRC's peer binding rests on: a change to it would silently
+// stop every client identifying, and the hub reaps un-welcomed
+// sessions without a word about why.
+func TestLinkIdentifyFrameContract(t *testing.T) {
+	id, err := rns.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity: %v", err)
+	}
+	linkID := bytes.Repeat([]byte{0xAB}, rns.IdentityHashLen)
+	pub := id.PublicKey()
 
-	t.Run("upstream 128-byte form", func(t *testing.T) {
-		frame := concat(pub, sig)
-		gotPub, gotSig, ok := parseIdentifyFrame(linkID, frame)
-		if !ok {
-			t.Fatal("128-byte public_key||sig form must be accepted")
-		}
-		if !bytes.Equal(gotPub, pub) || !bytes.Equal(gotSig, sig) {
-			t.Error("128-byte form sliced wrong")
+	if rns.LinkIdentifyBodyLen != 128 {
+		t.Errorf("LINKIDENTIFY body is %d bytes, want the 128-byte spec form",
+			rns.LinkIdentifyBodyLen)
+	}
+
+	sig := id.Sign(concat(linkID, pub))
+	if !rns.VerifyLinkIdentify(linkID, pub, sig) {
+		t.Fatal("a signature over link_id || public_key must verify")
+	}
+
+	t.Run("signing link_id alone is rejected", func(t *testing.T) {
+		if rns.VerifyLinkIdentify(linkID, pub, id.Sign(linkID)) {
+			t.Error("§6.7.6 requires the public key in the signed data")
 		}
 	})
 
-	t.Run("legacy 144-byte form", func(t *testing.T) {
-		frame := concat(linkID, pub, sig)
-		gotPub, gotSig, ok := parseIdentifyFrame(linkID, frame)
-		if !ok {
-			t.Fatal("144-byte link_id||public_key||sig form must be accepted")
-		}
-		if !bytes.Equal(gotPub, pub) || !bytes.Equal(gotSig, sig) {
-			t.Error("144-byte form sliced wrong")
+	t.Run("a signature for another link is rejected", func(t *testing.T) {
+		other := bytes.Repeat([]byte{0x11}, rns.IdentityHashLen)
+		if rns.VerifyLinkIdentify(linkID, pub, id.Sign(concat(other, pub))) {
+			t.Error("a LINKIDENTIFY captured on one link must not replay onto another")
 		}
 	})
 
-	t.Run("legacy form with a mismatched link_id is rejected", func(t *testing.T) {
-		frame := concat(bytes.Repeat([]byte{0xCC}, 16), pub, sig)
-		if _, _, ok := parseIdentifyFrame(linkID, frame); ok {
-			t.Error("a 144-byte frame whose embedded link_id is wrong must be rejected")
-		}
-	})
-
-	t.Run("other lengths are rejected", func(t *testing.T) {
-		// 80 is fwdsvc's old (also-wrong) form; the rest are near-misses.
-		for _, n := range []int{0, 80, 96, 127, 129, 143, 145} {
-			if _, _, ok := parseIdentifyFrame(linkID, make([]byte, n)); ok {
-				t.Errorf("%d-byte frame must be rejected", n)
-			}
+	t.Run("a corrupt signature is rejected", func(t *testing.T) {
+		bad := append([]byte(nil), sig...)
+		bad[len(bad)-1] ^= 0xFF
+		if rns.VerifyLinkIdentify(linkID, pub, bad) {
+			t.Error("a corrupted signature must not verify")
 		}
 	})
 }

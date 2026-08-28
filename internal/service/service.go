@@ -6,7 +6,6 @@ package service
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -27,25 +26,24 @@ import (
 // name_hash = SHA-256("rrc.hub")[:10] = ac9fd3a81e4036f86e1d.
 const hubAspect = "rrc.hub"
 
-// Decrypted lengths of a §6.6 LINKIDENTIFY frame. The signature covers
-// link_id || public_key in both forms.
+// LINKIDENTIFY (SPEC §6.7.6) is no longer parsed here.
 //
-//   - identifyLenUpstream (128): public_key(64) || signature(64) — the
-//     form upstream RNS link.identify() sends; every spec-compliant
-//     client (e.g. the Python RRC desktop client) uses this.
-//   - identifyLenLegacy (144): link_id(16) || public_key(64) ||
-//     signature(64) — a non-standard form older reticulum-mobile-app
-//     builds still send. Accepted until those clients ship the fix.
-const (
-	identifyLenUpstream = 64 + ed25519.SignatureSize
-	identifyLenLegacy   = 16 + 64 + ed25519.SignatureSize
-)
-
-// isIdentifyLen reports whether a decrypted link frame is a LINKIDENTIFY
-// by its length (either accepted form).
-func isIdentifyLen(n int) bool {
-	return n == identifyLenUpstream || n == identifyLenLegacy
-}
+// reticulum-go >= v0.4.0 handles context 0xFB inside the Transport —
+// it decrypts the frame, verifies the Ed25519 signature over
+// link_id || public_key, records the key on the Link, and CONSUMES the
+// packet, so the frame never reaches SetDefaultInboundDataHandler. The
+// hub therefore learns about identification through
+// SetRemoteIdentifiedHandler (see bindPeer) instead of sniffing link
+// DATA for a 128-byte body.
+//
+// One behaviour is lost in the move. RRC used to also accept a
+// non-standard 144-byte form, link_id(16) || public_key(64) ||
+// signature(64), that older reticulum-mobile-app builds sent. The
+// library is spec-pure and rejects it, and because it consumes the
+// packet there is no hook through which RRC can be lenient. Current
+// mobile builds send the spec form — Link.kt buildIdentifyPayload
+// documents the 144-byte layout as the bug it was — so this costs only
+// clients that have not been rebuilt since.
 
 // resourceSendTimeout bounds one outbound RNS Resource transfer to a
 // client. Generous enough for a slow mesh link to complete the
@@ -59,24 +57,6 @@ const resourceSendTimeout = 30 * time.Second
 // is malformed and must not be decoded (audit A4). Large payloads use
 // the RNS Resource path, which is handled separately.
 const maxLinkFrame = 8 * 1024
-
-// parseIdentifyFrame extracts the public key and signature from a
-// decrypted LINKIDENTIFY payload, accepting both the 128-byte upstream
-// form and the 144-byte legacy form. ok is false for any other length,
-// or for a legacy frame whose embedded link_id does not match linkID.
-func parseIdentifyFrame(linkID, plaintext []byte) (pubKey, sig []byte, ok bool) {
-	switch len(plaintext) {
-	case identifyLenUpstream:
-		return plaintext[0:64], plaintext[64:128], true
-	case identifyLenLegacy:
-		if !equalBytes(plaintext[0:16], linkID) {
-			return nil, nil, false
-		}
-		return plaintext[16:80], plaintext[80:144], true
-	default:
-		return nil, nil, false
-	}
-}
 
 // Service is the running RRC hub daemon.
 type Service struct {
@@ -106,7 +86,7 @@ type Service struct {
 	identities map[string]peerBinding  // linkID hex -> what LINKIDENTIFY proved
 }
 
-// peerBinding is what a verified §6.6 LINKIDENTIFY establishes about the
+// peerBinding is what a verified §6.7.6 LINKIDENTIFY establishes about the
 // remote end of a link.
 //
 // The public key is retained, not just the hash it reduces to: the hash
@@ -167,6 +147,9 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 
 	svc.transport.LinkManager().SetDefaultInboundDataHandler(svc.onLinkData)
 	svc.transport.LinkManager().SetResourceAssembledHandler(svc.onResourceAssembled)
+	// §6.7.6 identification is consumed by the Transport (see the note
+	// above bindPeer); this is how the hub hears about it.
+	svc.transport.LinkManager().SetRemoteIdentifiedHandler(svc.bindPeer)
 
 	logger.Printf("RRC hub %q — dest_name=%s dest_hash=%s identity=%s",
 		cfg.Hub.Name, hubAspect, hex.EncodeToString(svc.destHash), id.HexHash())
@@ -286,10 +269,6 @@ func (s *Service) onLinkData(linkID, plaintext []byte) {
 		s.sessionFor(linkID).OnInbound(plaintext)
 		return
 	}
-	if isIdentifyLen(len(plaintext)) {
-		s.handleIdentify(linkID, plaintext)
-		return
-	}
 	s.log.Printf("rrc: dropped %d-byte non-RRC link frame on %x", len(plaintext), linkID[:4])
 }
 
@@ -335,28 +314,24 @@ func (s *Service) sessionFor(linkID []byte) *hub.Session {
 	return created
 }
 
-// handleIdentify parses a §6.6 LINKIDENTIFY frame (either accepted
-// form — see parseIdentifyFrame), verifies the Ed25519 signature over
-// link_id || public_key, and binds the verified identity hash
-// (SHA-256(public_key)[:16]) to the link. The public key is carried in
-// the frame, so verification never depends on a prior announce.
-func (s *Service) handleIdentify(linkID, plaintext []byte) {
-	pubKey, sig, ok := parseIdentifyFrame(linkID, plaintext)
-	if !ok {
-		s.log.Printf("link %x: malformed LINKIDENTIFY (%d bytes) — dropped",
-			linkID[:4], len(plaintext))
+// bindPeer records what a verified §6.7.6 LINKIDENTIFY proved about a
+// link: the peer's 64-byte announced public key, and the identity hash
+// it reduces to.
+//
+// It is the LinkManager's remote-identified callback, so the signature
+// over link_id || public_key has already been checked (and the key
+// pinned assign-once) inside reticulum-go before this runs. What is
+// left is RRC's own bookkeeping — and specifically retaining the KEY,
+// not just its hash: the hash names the peer, but only the key derives
+// the peer's lxmf.delivery address, which is the sole way this hub can
+// reach somebody after their link is gone.
+func (s *Service) bindPeer(linkID, pubKey []byte) {
+	if len(pubKey) != rns.PublicKeyLen {
+		s.log.Printf("link %x: LINKIDENTIFY carried a %d-byte key — ignored", linkID[:4], len(pubKey))
 		return
 	}
-	signed := make([]byte, 0, len(linkID)+len(pubKey))
-	signed = append(signed, linkID...)
-	signed = append(signed, pubKey...)
-	if !ed25519.Verify(ed25519.PublicKey(pubKey[32:]), signed, sig) {
-		s.log.Printf("link %x: LINKIDENTIFY signature invalid — dropped", linkID[:4])
-		return
-	}
-
 	h := sha256.Sum256(pubKey)
-	idHash := append([]byte(nil), h[:16]...)
+	idHash := append([]byte(nil), h[:rns.IdentityHashLen]...)
 	s.mu.Lock()
 	s.identities[hex.EncodeToString(linkID)] = peerBinding{
 		hash:   idHash,
