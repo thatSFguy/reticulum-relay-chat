@@ -43,6 +43,19 @@ func TestTheShippedDefaultsCanActuallyDeliverAMention(t *testing.T) {
 	}
 }
 
+// A hub announces two destinations per tick, forever, to every node
+// that will relay them. Public transport nodes police that rate
+// (announce_rate_target / _grace / _penalty in upstream RNS Transport),
+// and a hub that gets itself throttled by the node it depends on is
+// worse off than one that announces half as often.
+func TestTheAnnounceIntervalIsNeighbourly(t *testing.T) {
+	d := config.DefaultsForTest()
+	if d.AnnounceInterval.Duration < 15*time.Minute {
+		t.Errorf("announce_interval defaults to %v; that is two packets flooded across the mesh every %v, and public nodes throttle for less",
+			d.AnnounceInterval.Duration, d.AnnounceInterval.Duration)
+	}
+}
+
 // The push loop only starts when there is something for it to do.
 func TestTheMentionLoopIsNotStartedWhenTheFeatureIsOff(t *testing.T) {
 	for _, tc := range []struct {
