@@ -81,6 +81,12 @@ jobs:
       # no such limit.
       - name: Cross-compile every target
         run: .github/build-targets.sh "${GITHUB_REF_NAME}"
+      # Ship the example config alongside the binaries. Config keys move
+      # between versions, so pairing a released binary with whatever is
+      # currently at the tip of a branch is how someone ends up debugging
+      # a key their build does not have.
+      - name: Stage the example config
+        run: cp configs/rrc-hub.example.toml dist/
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - name: Publish release
