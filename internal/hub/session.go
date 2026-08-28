@@ -26,6 +26,18 @@ type Session struct {
 
 	pingAwaitMs int64 // 0 = not awaiting a PONG
 
+	// lastAliveMs is the hub's clock when this peer was last heard
+	// from — any inbound frame at all, since every one of them had to
+	// cross a live link to get here.
+	//
+	// Room membership is NOT evidence of presence. A client that closes
+	// its app leaves the link to rot, and the hub goes on listing it as
+	// a member until a PING goes unanswered for ping_timeout — up to
+	// ping_interval + ping_timeout of phantom presence. Anything that
+	// treats "in the room" as "received the message" is wrong for that
+	// whole window. See mentionLivenessProven.
+	lastAliveMs int64
+
 	lastHistoryPullMs int64 // 0 = never; throttles /history (see cmdHistory)
 
 	expectations []*resourceExpectation
@@ -96,6 +108,13 @@ func (s *Session) OnInbound(frame []byte) {
 	}
 	h.statInc(&h.stats.pktsIn)
 	h.statAdd(&h.stats.bytesIn, int64(len(frame)))
+
+	// Heard from. Recorded before the rate limiter and the decoder: even
+	// a malformed or throttled frame is proof the peer is still on the
+	// other end, which is all this timestamp claims.
+	s.mu.Lock()
+	s.lastAliveMs = h.now()
+	s.mu.Unlock()
 
 	// Rate limit BEFORE decode (audit A19): CBOR decoding is itself
 	// attacker-driven work, so a flood of malformed frames must be

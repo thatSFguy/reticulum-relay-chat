@@ -196,13 +196,17 @@ func (h *Hub) noteMentions(room string, env *rrc.Envelope) {
 		if p, ok := h.peers[t.idHex]; ok && p.NotifyOptOut {
 			continue
 		}
-		if t.session != nil {
-			// Already in the room: fan-out delivered the message itself,
-			// and a second "you were mentioned" for a line they are
-			// looking at is noise.
+		// A session object is not a person. Everything below turns on
+		// whether the hub has recent evidence the peer is still on the
+		// other end of it — see mentionLivenessProven.
+		if t.session != nil && h.mentionLivenessProven(t.session) {
+			// In the room: fan-out delivered the message itself, and a
+			// second "you were mentioned" for a line they are looking
+			// at is noise.
 			if r != nil && r.hasMember(t.session) {
 				continue
 			}
+			// Connected, but somewhere else: tell them now.
 			live = append(live, pending{
 				sess: t.session,
 				text: fmt.Sprintf("you were mentioned in %s by %s: %s",
@@ -210,6 +214,12 @@ func (h *Hub) noteMentions(room string, env *rrc.Envelope) {
 			})
 			continue
 		}
+		// Either gone, or holding a link the hub has not heard from
+		// recently enough to trust. Queue it. Writing a NOTICE into a
+		// link that may already be dead would be the same mistake as
+		// counting the fan-out — a send with nothing behind it — and if
+		// the peer turns out to be fine, a queued mention costs them a
+		// duplicate on their next session rather than nothing at all.
 		h.queueMentionLocked(t.idHex, peerreg.Mention{
 			Room:   room,
 			ByNick: byNick,
@@ -227,6 +237,62 @@ func (h *Hub) noteMentions(room string, env *rrc.Envelope) {
 	if queued > 0 {
 		h.log.Printf("mentions: held %d notification(s) from #%s for absent peers", queued, room)
 	}
+}
+
+// mentionLivenessProven reports whether the hub has recent enough
+// evidence that a session's peer is really there to treat the room
+// fan-out as having reached them.
+//
+// This is the difference between a mention arriving and a mention
+// disappearing, and it is worth being blunt about why. Room membership
+// only says the hub has not noticed them leave. A client that is closed
+// or loses signal leaves its link to rot, and the hub keeps listing it
+// as a member until a PING goes unanswered for the full ping_timeout —
+// so there is a window of up to ping_interval + ping_timeout in which
+// the hub is confidently wrong. A mention landing in that window used
+// to be skipped on the grounds that fan-out had handled it, and it was
+// then neither delivered nor queued: gone, with no log line.
+//
+// Observed live on 2026-08-28 with ping_interval=30s, ping_timeout=60s:
+//
+//	09:02:14  Walden      "bey"
+//	09:03:03  someone     "@Walden check this"   <- skipped as present
+//	09:03:54  hub: ping timeout, closing Walden
+//
+// So presence is judged on the last frame actually received from the
+// peer, and the bar is one ping interval: a live client answers every
+// PING, so its last-heard age stays under that, while a client that has
+// gone quiet crosses it long before the hub gets around to closing the
+// link.
+//
+// Being wrong the other way costs a duplicate — the peer sees the
+// message in the room and gets a notification about it — which is the
+// trade this feature has made everywhere else, and the right one.
+//
+// With ping_interval unset there is nothing to measure against and no
+// keepalive to measure: the hub cannot tell presence from absence at
+// all, and this returns true to leave the old behaviour alone rather
+// than notify every active member of every mention. That configuration
+// is documented as one in which mention notification is not
+// trustworthy, and this is one of the reasons.
+func (h *Hub) mentionLivenessProven(s *Session) bool {
+	interval := h.cfg.PingInterval.Duration
+	if interval <= 0 {
+		return true
+	}
+	// One interval plus half again. A live client is pinged every
+	// interval and answers within a round trip, so its last-heard age
+	// sits just under interval + RTT; the extra half is headroom for a
+	// slow mesh, and still fires well inside the
+	// interval + ping_timeout window before the link is closed.
+	within := interval + interval/2
+	s.mu.Lock()
+	last := s.lastAliveMs
+	s.mu.Unlock()
+	if last == 0 {
+		return false
+	}
+	return h.now()-last <= within.Milliseconds()
 }
 
 // queueMentionLocked files a mention for a peer who is not connected.

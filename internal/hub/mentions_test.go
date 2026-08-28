@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/peerreg"
@@ -466,5 +467,103 @@ func TestAHexShapedNickIsStillMentionable(t *testing.T) {
 				t.Fatalf("%d mentions queued for @%s, want 1", got, nick)
 			}
 		})
+	}
+}
+
+// The silent-loss case, reproduced from a live run.
+//
+// A peer closes their client. The link rots, but the hub keeps listing
+// them as a room member until a PING goes unanswered for ping_timeout.
+// A mention landing in that window used to be skipped on the grounds
+// that room fan-out had delivered it — so it was neither sent nor
+// queued, and vanished with no log line.
+//
+// Observed 2026-08-28, ping_interval=30s ping_timeout=60s:
+//
+//	09:02:14  Walden      "bey"
+//	09:03:03  someone     "@Walden check this"   <- lost here
+//	09:03:54  hub: ping timeout, closing Walden
+func TestAMentionSurvivesAPeerWhoLeftBeforeTheHubNoticed(t *testing.T) {
+	h := mentionHub(t, func(c *config.HubConfig) {
+		c.PingInterval = config.Duration{Duration: 30 * time.Second}
+		c.PingTimeout = config.Duration{Duration: 60 * time.Second}
+	})
+
+	walden, _, waldenID := connectKeyed(t, h, 0xB2, "Walden")
+	join(t, walden, waldenID, "#lobby", "")
+
+	other, _, otherID := connectKeyed(t, h, 0xA1, "someone")
+	join(t, other, otherID, "#lobby", "")
+
+	// Walden's client goes away. Nothing tells the hub: no part, no
+	// close, just silence. They are still a member of #lobby.
+	walden.mu.Lock()
+	walden.lastAliveMs = h.now() - (49 * time.Second).Milliseconds()
+	walden.mu.Unlock()
+	h.mu.Lock()
+	var stillMember bool
+	for _, r := range h.rooms {
+		if r.hasMember(walden) {
+			stillMember = true
+		}
+	}
+	h.mu.Unlock()
+	if !stillMember {
+		t.Fatal("setup: Walden must still look like a room member")
+	}
+
+	say(t, other, otherID, "#lobby", "@Walden check this")
+
+	pending := pendingFor(h, waldenID)
+	if len(pending) != 1 {
+		t.Fatalf("queued %d mentions for a peer who had already gone, want 1 — "+
+			"a mention in the detection window must not be written off as delivered",
+			len(pending))
+	}
+	if !strings.Contains(pending[0].Text, "check this") {
+		t.Errorf("queued mention text = %q", pending[0].Text)
+	}
+}
+
+// The other half: someone actually in the room, actually answering,
+// must NOT also be notified. They are looking at the message.
+func TestAMentionForSomeoneDemonstrablyPresentIsNotQueued(t *testing.T) {
+	h := mentionHub(t, func(c *config.HubConfig) {
+		c.PingInterval = config.Duration{Duration: 30 * time.Second}
+		c.PingTimeout = config.Duration{Duration: 60 * time.Second}
+	})
+
+	walden, _, waldenID := connectKeyed(t, h, 0xB2, "Walden")
+	join(t, walden, waldenID, "#lobby", "")
+	other, _, otherID := connectKeyed(t, h, 0xA1, "someone")
+	join(t, other, otherID, "#lobby", "")
+
+	// join() was inbound traffic, so Walden was heard from just now.
+	say(t, other, otherID, "#lobby", "@Walden check this")
+
+	if n := len(pendingFor(h, waldenID)); n != 0 {
+		t.Errorf("queued %d mentions for a peer sitting in the room, want 0", n)
+	}
+}
+
+// With no keepalive configured the hub cannot tell presence from
+// absence at all, and must not start notifying every active member of
+// every mention. That configuration is documented as one where mention
+// notification is untrustworthy; it is not one where it is noisy.
+func TestWithoutKeepaliveTheOldPresenceRuleStands(t *testing.T) {
+	h := mentionHub(t, nil) // ping_interval unset
+	walden, _, waldenID := connectKeyed(t, h, 0xB2, "Walden")
+	join(t, walden, waldenID, "#lobby", "")
+	other, _, otherID := connectKeyed(t, h, 0xA1, "someone")
+	join(t, other, otherID, "#lobby", "")
+
+	walden.mu.Lock()
+	walden.lastAliveMs = h.now() - (10 * time.Minute).Milliseconds()
+	walden.mu.Unlock()
+
+	say(t, other, otherID, "#lobby", "@Walden check this")
+
+	if n := len(pendingFor(h, waldenID)); n != 0 {
+		t.Errorf("queued %d mentions with no keepalive to judge presence by, want 0", n)
 	}
 }
