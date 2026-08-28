@@ -257,11 +257,15 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 	}
 	var uploaded int
 	var lastErr error
+	// allWaiting stays true while every failure so far is a "not yet"
+	// rather than a "no": see waitingCondition.
+	allWaiting := true
 	for _, node := range nodes {
 		_, err := n.delivery.SendPropagated(node, known.DestHash, []byte(title), []byte(body), nil)
 		n.nodes.RecordResult(node, err)
 		if err != nil {
 			lastErr = err
+			allWaiting = allWaiting && waitingCondition(err)
 			n.svc.log.Printf("lxmf: upload for %x to node %x failed: %v",
 				known.DestHash[:4], node[:4], err)
 			// A pinned node we have never heard from cannot be linked
@@ -285,6 +289,15 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 			known.DestHash[:4], node)
 	}
 	if uploaded == 0 {
+		if allWaiting && waitingCondition(directErr) {
+			// Nothing was refused; we are missing announces on both
+			// routes and have just asked for the paths. Treat it as
+			// "not yet" so the hub retries on the next tick instead of
+			// spending the peer's whole push interval waiting for a
+			// packet that is probably seconds away.
+			return fmt.Errorf("%w: %v (direct: %v)",
+				hub.ErrNotifierUnavailable, lastErr, directErr)
+		}
 		return fmt.Errorf("no route to %x: direct: %v; propagation: %w",
 			known.DestHash[:4], directErr, lastErr)
 	}
@@ -298,6 +311,24 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 	}
 	return fmt.Errorf("%w: uploaded to %d node(s), no receipt from the recipient",
 		hub.ErrDeliveredUnconfirmed, uploaded)
+}
+
+// waitingCondition reports an error that means "not yet" rather than
+// "no": the announce we need has not arrived, so there is no key to
+// encrypt with or no path to open a link over. Both send paths ask the
+// network for the missing path before returning, which makes the next
+// attempt materially more likely to work — so this is a condition to
+// retry promptly, not one to spend a push interval on.
+//
+// It is a routine state, not an edge case. The announce cache is
+// in-memory only (there is no announces.json), so a hub that has just
+// restarted knows nothing about anybody — including a propagation node
+// its own operator pinned. Observed live: a pinned node failed with
+// ErrPropagationNodeUnknown 40 seconds after start, and the mention was
+// parked for half an hour over it.
+func waitingCondition(err error) bool {
+	return errors.Is(err, lxmf.ErrPropagationNodeUnknown) ||
+		errors.Is(err, lxmf.ErrRecipientUnknown)
 }
 
 // sendDirect attempts route 1. The library picks a single opportunistic

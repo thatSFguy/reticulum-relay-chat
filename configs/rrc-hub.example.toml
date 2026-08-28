@@ -162,26 +162,51 @@ mention_snippet_bytes = 140    # how much of the message a notification quotes (
 # on their next visit.
 #
 # A held mention is not a notification: nothing tells the person to come
-# and look. With mention_lxmf on, the hub hands waiting mentions to an
-# LXMF propagation node, where the recipient's own client (Sideband,
-# MeshChat, NomadNet, the mobile app) collects them on its next sync and
-# surfaces them like any other message. No RRC client changes.
+# and look. With mention_lxmf on, the hub sends waiting mentions to the
+# recipient's LXMF client (Sideband, MeshChat, NomadNet, the mobile
+# app), which surfaces them like any other message. No RRC client
+# changes.
+#
+# Two routes are tried, in this order:
+#
+#   1. DIRECT to the recipient's lxmf.delivery destination, waiting for
+#      their own delivery proof. This is the one that usually works, and
+#      the only one that proves anything: leaving a room is not leaving
+#      the mesh, and an LXMF client is typically a background service
+#      that is still there after the RRC app is closed.
+#   2. STORE-AND-FORWARD via a propagation node, held until the
+#      recipient's client next syncs.
 #
 # The address is derived from the public key the peer proved when it
 # last connected, so nobody has to register anything. This assumes a
 # peer uses the same identity for RRC and for LXMF — true of
-# reticulum-mobile-app, not guaranteed in general. When delivery fails
-# the mention simply stays queued for their next RRC session.
+# reticulum-mobile-app, not guaranteed in general. When neither route
+# confirms delivery the mention simply stays queued for their next RRC
+# session, so the worst case is seeing it twice.
 #
 # Requires mention_notify = true.
 mention_lxmf = false
 
 # Pin a propagation node by its lxmf.propagation destination hash (32
-# hex characters). Unset = auto-select the longest-known node that is
-# currently accepting. Pin one when you actually know one — your own
-# node, or your community's — since a pinned node is a trust decision
-# the hub will not quietly fall back from.
+# hex characters). Unset = auto-select.
+#
+# Pin one when you actually know one — your own node, or your
+# community's. A pinned node is a trust decision the hub will not
+# quietly fall back from, and it is the only way to be sure the message
+# is waiting somewhere your users' clients actually sync from.
 lxmf_propagation_node = ""
+
+# How many auto-selected propagation nodes one notification is left
+# with. Ignored when lxmf_propagation_node is pinned. (default 2, max 5)
+#
+# More than one because nothing in an announce says which node a given
+# recipient syncs from, so a single pick out of the dozens announcing on
+# a public mesh is close to a guess — and a message parked on the wrong
+# node is never seen. Copies cost you airtime and cost the recipient
+# nothing: LXMF dedupes on message_id, so a message that arrives twice
+# is shown once. This is the FALLBACK route, reached only after direct
+# delivery has already failed.
+lxmf_propagation_fanout = 2
 
 [hub.limits]
 # Client-facing limits advertised in WELCOME and enforced hub-side.
