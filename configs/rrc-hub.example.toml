@@ -13,8 +13,10 @@
 # Display name shown to clients in the WELCOME message. (default "RRC Hub")
 name = "RRC Hub"
 
-# Software version string advertised in WELCOME. (default "rrc-hub-go/0.2.0")
-version = "rrc-hub-go/0.2.0"
+# Software version string advertised in WELCOME. Leave it commented out
+# and the hub advertises its own build version, which is what you almost
+# certainly want. Set it only to advertise something else.
+# version = "rrc-hub-go/1.2.3"
 
 # Optional message-of-the-day, delivered as NOTICE(s) right after
 # WELCOME. Text over 512 bytes is sent as an RNS Resource when resource
