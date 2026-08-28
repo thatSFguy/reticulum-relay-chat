@@ -16,6 +16,7 @@ import (
 // fakeLink is an in-memory hub.Link that records every frame sent to it.
 type fakeLink struct {
 	id          []byte
+	pubKey      []byte // nil unless a test needs the identified-peer key
 	mu          sync.Mutex
 	sent        [][]byte
 	resources   [][]byte
@@ -37,6 +38,8 @@ func (f *fakeLink) Close() {
 }
 
 func (f *fakeLink) PeerIdentityHash() []byte { return f.id }
+
+func (f *fakeLink) PeerPublicKey() []byte { return f.pubKey }
 
 func (f *fakeLink) SendResource(payload []byte) error {
 	if f.noResources {

@@ -34,11 +34,37 @@ type HubConfig struct {
 	BannedIdentities  []string `toml:"banned_identities"`
 
 	// Persistence.
-	RoomRegistryPath          string   `toml:"room_registry_path"`
+	RoomRegistryPath string `toml:"room_registry_path"`
+	// DefaultRooms are created, registered, at every start so a brand
+	// new hub is not an empty prompt. Absent from the config means
+	// ["lobby"]; an explicit empty list means none.
+	//
+	// They are REGISTERED because that is what makes a room real when
+	// nobody is in it: /list only shows registered rooms, and an
+	// unregistered one is dropped the moment its last member parts,
+	// taking its transcript with it. A default room that evaporated
+	// between visitors would not be a default room.
+	//
+	// They get no founder and no operators. The room belongs to the
+	// hub, not to whoever happened to arrive first — server operators
+	// (hub.trusted) can already administer any room, so it is not
+	// ownerless in practice.
+	DefaultRooms              []string `toml:"default_rooms"`
 	KlinePath                 string   `toml:"kline_path"`
 	RoomRegistryPruneAfter    Duration `toml:"room_registry_prune_after"`
 	RoomRegistryPruneInterval Duration `toml:"room_registry_prune_interval"`
-	RoomInviteTimeout         Duration `toml:"room_invite_timeout"`
+
+	// MentionPushInterval is how often the hub tries to deliver mentions
+	// waiting for peers who are not connected.
+	//
+	// It has its own timer because it used to share the room-registry
+	// prune timer, whose default is an hour — so a hub with mention
+	// notification switched on would sit on somebody's message for up
+	// to an hour before the first delivery attempt, which is not a
+	// notification. The two jobs have nothing to do with each other:
+	// pruning stale rooms is housekeeping, and this is the feature.
+	MentionPushInterval Duration `toml:"mention_push_interval"`
+	RoomInviteTimeout   Duration `toml:"room_invite_timeout"`
 
 	// Behavior.
 	IncludeJoinedMemberList bool `toml:"include_joined_member_list"`
@@ -60,6 +86,57 @@ type HubConfig struct {
 	MaxResourceBytes               int      `toml:"max_resource_bytes"`
 	MaxPendingResourceExpectations int      `toml:"max_pending_resource_expectations"`
 	ResourceExpectationTTL         Duration `toml:"resource_expectation_ttl"`
+
+	// History — the retained room transcript and the replay a joining
+	// client gets. Off by default: turning it on means the hub starts
+	// keeping plaintext conversation on disk, which is an operator's
+	// decision to make, not one an upgrade should make for them.
+	HistoryEnabled         bool     `toml:"history_enabled"`
+	HistoryPath            string   `toml:"history_path"`
+	HistoryRetention       Duration `toml:"history_retention"`
+	HistoryMaxBytesPerRoom int64    `toml:"history_max_bytes_per_room"`
+	HistoryMaxTotalBytes   int64    `toml:"history_max_total_bytes"`
+	// HistoryReplayCount / HistoryReplayBytes bound the automatic replay
+	// sent on JOIN. They are deliberately small: a client may be on a
+	// LoRa link where a week of backlog is minutes of airtime, so the
+	// join replay is a taste of the conversation and /history is how a
+	// client asks for more.
+	HistoryReplayCount int `toml:"history_replay_count"`
+	HistoryReplayBytes int `toml:"history_replay_bytes"`
+	// HistoryPullCount / HistoryPullBytes bound one /history request.
+	HistoryPullCount int `toml:"history_pull_count"`
+	HistoryPullBytes int `toml:"history_pull_bytes"`
+
+	// Mentions — telling someone they were named while they were not
+	// looking. Independent of history: a hub can notify without
+	// retaining, or retain without notifying.
+	MentionNotify       bool   `toml:"mention_notify"`
+	PeerRegistryPath    string `toml:"peer_registry_path"`
+	MaxKnownPeers       int    `toml:"max_known_peers"`
+	MaxPendingMentions  int    `toml:"max_pending_mentions"`
+	MentionSnippetBytes int    `toml:"mention_snippet_bytes"`
+	// MentionLXMF hands a waiting mention to an LXMF propagation node,
+	// where the recipient's own client collects it — the only way to
+	// reach someone whose RRC link is gone. Without it a mention still
+	// waits, but nothing tells them to come and look.
+	MentionLXMF bool `toml:"mention_lxmf"`
+	// LXMFPropagationNode pins the store-and-forward node the fallback
+	// route uses. Empty auto-selects; see internal/service/propnodes.go.
+	LXMFPropagationNode string `toml:"lxmf_propagation_node"`
+	// LXMFPropagationFanout is how many auto-selected nodes one
+	// notification is left with. Ignored when a node is pinned.
+	//
+	// More than one because the hub cannot know which node the recipient
+	// syncs from — nothing in an announce says — so a single choice out
+	// of the dozens announcing is close to a guess, and a message parked
+	// on the wrong node is never seen. Copies cost the sender airtime
+	// and cost the recipient nothing: LXMF dedupes on message_id, so a
+	// message that arrives twice is shown once.
+	//
+	// Kept small deliberately. This is the FALLBACK route, reached only
+	// after direct delivery has already failed, and each copy is its own
+	// link handshake and transfer to a different node.
+	LXMFPropagationFanout int `toml:"lxmf_propagation_fanout"`
 
 	Limits LimitsConfig `toml:"limits"`
 }
@@ -105,26 +182,54 @@ func (d Duration) MarshalText() ([]byte, error) {
 func defaults() Config {
 	return Config{
 		Hub: HubConfig{
-			Name:                           "RRC Hub",
-			Version:                        "rrc-hub-go/0.1.0",
-			IdentityPath:                   "hub_identity",
-			DestName:                       "rrc.hub",
-			AnnounceOnStart:                true,
-			AnnounceInterval:               Duration{5 * time.Minute},
-			RoomRegistryPruneAfter:         Duration{30 * 24 * time.Hour},
-			RoomRegistryPruneInterval:      Duration{time.Hour},
-			RoomInviteTimeout:              Duration{15 * time.Minute},
-			IncludeJoinedMemberList:        false,
-			MaxSessions:                    256,
-			MaxRooms:                       512,
-			MaxRegisteredRoomsPerIdentity:  16,
-			MaxRoomAclEntries:              256,
-			PingInterval:                   Duration{0},
-			PingTimeout:                    Duration{0},
+			Name:                          "RRC Hub",
+			Version:                       "rrc-hub-go/0.2.0",
+			IdentityPath:                  "hub_identity",
+			DestName:                      "rrc.hub",
+			AnnounceOnStart:               true,
+			AnnounceInterval:              Duration{5 * time.Minute},
+			RoomRegistryPruneAfter:        Duration{30 * 24 * time.Hour},
+			RoomRegistryPruneInterval:     Duration{time.Hour},
+			MentionPushInterval:           Duration{time.Minute},
+			RoomInviteTimeout:             Duration{15 * time.Minute},
+			IncludeJoinedMemberList:       false,
+			MaxSessions:                   256,
+			MaxRooms:                      512,
+			MaxRegisteredRoomsPerIdentity: 16,
+			MaxRoomAclEntries:             256,
+			// Keepalive ON by default. These used to default to 0,
+			// which disabled hub PINGs *and* link teardown on a missing
+			// PONG — so a hub never learned that a client had gone and
+			// listed dead peers as present in a room forever. Every
+			// feature that turns on "is this person here?" was wrong out
+			// of the box, mention notification worst of all: the people
+			// most in need of an offline notification (dropped link,
+			// killed app, dead battery) were exactly the ones the hub
+			// still believed were in the room. Set either to 0 to
+			// restore the old behaviour deliberately.
+			PingInterval:                   Duration{30 * time.Second},
+			PingTimeout:                    Duration{60 * time.Second},
 			EnableResourceTransfer:         true,
 			MaxResourceBytes:               262144,
 			MaxPendingResourceExpectations: 8,
 			ResourceExpectationTTL:         Duration{30 * time.Second},
+			HistoryEnabled:                 false,
+			HistoryPath:                    "history",
+			HistoryRetention:               Duration{7 * 24 * time.Hour},
+			HistoryMaxBytesPerRoom:         4 * 1024 * 1024,
+			HistoryMaxTotalBytes:           128 * 1024 * 1024,
+			HistoryReplayCount:             10,
+			HistoryReplayBytes:             2048,
+			HistoryPullCount:               100,
+			HistoryPullBytes:               16384,
+			MentionNotify:                  false,
+			PeerRegistryPath:               "peers.toml",
+			MaxKnownPeers:                  2048,
+			MaxPendingMentions:             20,
+			MentionSnippetBytes:            140,
+			DefaultRooms:                   []string{"lobby"},
+			MentionLXMF:                    false,
+			LXMFPropagationFanout:          2,
 			Limits: LimitsConfig{
 				MaxNickBytes:        32,
 				MaxRoomNameBytes:    64,
@@ -143,6 +248,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: %w", err)
 	}
 	applyLimitDefaults(&c.Hub.Limits)
+	applyHistoryDefaults(&c.Hub)
+	applyMentionDefaults(&c.Hub)
 	if c.Hub.MaxResourceBytes <= 0 {
 		c.Hub.MaxResourceBytes = 262144
 	}
@@ -166,6 +273,70 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
+// applyHistoryDefaults fills in any history knob an operator left unset.
+// A hub that enables history without tuning it must still get bounded,
+// sane behavior rather than an unbounded store or an empty replay.
+func applyHistoryDefaults(h *HubConfig) {
+	d := defaults().Hub
+	if h.HistoryPath == "" {
+		h.HistoryPath = d.HistoryPath
+	}
+	if h.HistoryRetention.Duration <= 0 {
+		h.HistoryRetention = d.HistoryRetention
+	}
+	if h.HistoryMaxBytesPerRoom <= 0 {
+		h.HistoryMaxBytesPerRoom = d.HistoryMaxBytesPerRoom
+	}
+	if h.HistoryMaxTotalBytes <= 0 {
+		h.HistoryMaxTotalBytes = d.HistoryMaxTotalBytes
+	}
+	if h.HistoryReplayCount < 0 {
+		h.HistoryReplayCount = 0
+	} else if h.HistoryReplayCount == 0 {
+		h.HistoryReplayCount = d.HistoryReplayCount
+	}
+	if h.HistoryReplayBytes <= 0 {
+		h.HistoryReplayBytes = d.HistoryReplayBytes
+	}
+	if h.HistoryPullCount <= 0 {
+		h.HistoryPullCount = d.HistoryPullCount
+	}
+	if h.HistoryPullBytes <= 0 {
+		h.HistoryPullBytes = d.HistoryPullBytes
+	}
+}
+
+// applyMentionDefaults fills in any unset mention knob, so enabling
+// notifications without tuning them still yields bounded behavior.
+func applyMentionDefaults(h *HubConfig) {
+	d := defaults().Hub
+	if h.PeerRegistryPath == "" {
+		h.PeerRegistryPath = d.PeerRegistryPath
+	}
+	if h.MaxKnownPeers <= 0 {
+		h.MaxKnownPeers = d.MaxKnownPeers
+	}
+	if h.MaxPendingMentions <= 0 {
+		h.MaxPendingMentions = d.MaxPendingMentions
+	}
+	if h.MentionSnippetBytes <= 0 {
+		h.MentionSnippetBytes = d.MentionSnippetBytes
+	}
+	if h.LXMFPropagationFanout <= 0 {
+		h.LXMFPropagationFanout = d.LXMFPropagationFanout
+	}
+	// A hub that fanned out to every node it has heard would be a
+	// broadcast amplifier with its own return address on it, on a mesh
+	// where announces are free and unauthenticated.
+	if h.LXMFPropagationFanout > maxPropagationFanout {
+		h.LXMFPropagationFanout = maxPropagationFanout
+	}
+}
+
+// maxPropagationFanout caps lxmf_propagation_fanout however it is
+// configured.
+const maxPropagationFanout = 5
+
 func applyLimitDefaults(l *LimitsConfig) {
 	if l.MaxNickBytes <= 0 {
 		l.MaxNickBytes = 32
@@ -183,3 +354,8 @@ func applyLimitDefaults(l *LimitsConfig) {
 		l.RateLimitMsgsPerMin = 240
 	}
 }
+
+// DefaultsForTest exposes the shipped defaults so tests can assert on
+// them. The defaults are part of the product — several features only
+// work if they are right — and nothing else can check that.
+func DefaultsForTest() HubConfig { return defaults().Hub }

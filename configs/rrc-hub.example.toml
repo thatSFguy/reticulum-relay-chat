@@ -51,6 +51,25 @@ banned_identities = []
 # registration persistence. (default "")
 room_registry_path = "rooms.toml"
 
+# Rooms that exist from the moment the hub starts, so the first person
+# to connect finds somewhere to be instead of an empty prompt.
+# (default ["lobby"] — set to [] for none)
+#
+# They are created REGISTERED, which is what makes a room real when
+# nobody is in it: /list shows only registered rooms, and an
+# unregistered room is dropped the moment its last member parts, taking
+# its transcript with it. A registered default room also means joiners
+# get history replay rather than a blank slate on every restart.
+#
+# They get no founder and no operators — the room belongs to the hub,
+# not to whoever arrives first. Anyone in trusted_identities can
+# administer it. A leading "#" is accepted and ignored.
+#
+# A room that already exists in rooms.toml is left exactly as it is;
+# this only ensures the room EXISTS, and never resets a topic, mode,
+# operator or ban somebody set deliberately.
+default_rooms = ["lobby"]
+
 # Path to the persisted kline list. Empty disables kline persistence.
 # (default "")
 kline_path = "klines.txt"
@@ -63,17 +82,36 @@ room_registry_prune_after = "720h"
 # How often the prune sweep runs. (default "1h")
 room_registry_prune_interval = "1h"
 
+# How often the hub tries to deliver mentions waiting for peers who are
+# not connected. (default "60s"; 0 disables the push entirely and leaves
+# mentions to be delivered over RRC on the peer's next visit)
+#
+# Separate from room_registry_prune_interval above on purpose. These
+# once shared a timer, so with its 1h default a hub would sit on
+# somebody's message for up to an hour before the FIRST delivery
+# attempt. Pruning stale rooms is housekeeping on a slow clock; this is
+# the feature, and it needs a fast one.
+mention_push_interval = "60s"
+
 # Time-to-live for a room invite created by /invite. (default "15m")
 room_invite_timeout = "15m"
 
 # Include the member-hash list in JOINED/PARTED broadcasts. (default false)
 include_joined_member_list = false
 
-# Hub-initiated keepalive. A zero ping_interval disables hub PINGs; a
-# zero ping_timeout disables tearing a link down for a missing PONG.
-# (defaults: ping_interval "0s", ping_timeout "0s")
-ping_interval = "0s"
-ping_timeout = "0s"
+# Hub-initiated keepalive. (defaults: ping_interval "30s",
+# ping_timeout "60s")
+#
+# LEAVE THESE ON unless you know why you are turning them off. A zero
+# ping_interval disables hub PINGs *and* a zero ping_timeout disables
+# tearing a link down for a missing PONG — so the hub never learns that
+# a client vanished and lists dead peers as present in a room forever.
+# Everything that asks "is this person here?" is then wrong, and
+# mention_notify worst of all: the people most in need of an offline
+# notification (dropped link, killed app, dead battery) are exactly the
+# ones the hub still believes are sitting in the room.
+ping_interval = "30s"
+ping_timeout = "60s"
 
 # Allow large payloads to transfer as RNS Resources (greeting/MOTD over
 # 512 bytes, inbound RESOURCE_ENVELOPE handling). (default true)
@@ -90,6 +128,123 @@ max_pending_resource_expectations = 8
 # How long a pending inbound resource expectation lives before the
 # reaper drops it. (default "30s")
 resource_expectation_ttl = "30s"
+
+# --- room history -----------------------------------------------------
+#
+# Off by default. Turning it on means the hub keeps plaintext room
+# conversation on disk for the retention window, which is an operator's
+# decision — the hub already sees every message in order to relay it,
+# but keeping it is a different promise to your users than relaying it.
+#
+# When enabled, a client joining a room is replayed the last few
+# messages so it lands in a conversation rather than an empty screen,
+# and /history asks for more. Nothing about this needs a client change:
+# a replay is ordinary MSG traffic bracketed by NOTICEs, and /history is
+# an ordinary slash command.
+history_enabled = false
+
+# Where transcripts live. One directory per room, one append-only file
+# per room per UTC day. (default "history")
+history_path = "history"
+
+# How long a message stays replayable. (default "168h" — seven days)
+history_retention = "168h"
+
+# Storage bounds. Whichever binds first evicts oldest-day-first; the
+# current day is never evicted, so a busy room loses its past rather
+# than the conversation in progress.
+history_max_bytes_per_room = 4194304     # (default 4 MiB)
+history_max_total_bytes = 134217728      # (default 128 MiB)
+
+# What a client is replayed automatically when it joins. Keep these
+# small: a client may be on a LoRa link where a week of backlog is
+# minutes of airtime. This is a taste of the conversation, not an
+# archive — /history is how a client asks for the rest.
+history_replay_count = 10                # (default 10; 0 disables the join replay)
+history_replay_bytes = 2048              # (default 2048)
+
+# Bounds on one /history request.
+history_pull_count = 100                 # (default 100)
+history_pull_bytes = 16384               # (default 16384)
+
+# --- mention notifications --------------------------------------------
+#
+# Off by default. When on, a message that names someone — "@alice", or
+# "@" plus 6+ characters of their identity hash — reaches them even if
+# they were not in the room:
+#
+#   * in the room already  -> nothing; they got the message itself
+#   * connected elsewhere  -> a NOTICE right away
+#   * not connected        -> held, and delivered when they next connect
+#
+# Resolution is deliberately conservative. RRC nicknames are advisory
+# and not unique, so an ambiguous "@name" notifies nobody rather than
+# guessing; the hash-prefix form is the way to be certain.
+#
+# Anyone can turn this off for themselves with /notify off.
+mention_notify = false
+
+# Where the peer directory lives: the identities this hub has met, their
+# public keys, their last nickname, and any mentions waiting for them.
+# The keys are what make someone reachable after their link is gone.
+# (default "peers.toml")
+peer_registry_path = "peers.toml"
+
+# Bounds. The directory evicts the least recently seen identity when
+# full; a peer's pending mentions evict oldest-first.
+max_known_peers = 2048         # (default 2048)
+max_pending_mentions = 20      # per peer (default 20)
+mention_snippet_bytes = 140    # how much of the message a notification quotes (default 140)
+
+# Actually reach people who are offline, rather than only telling them
+# on their next visit.
+#
+# A held mention is not a notification: nothing tells the person to come
+# and look. With mention_lxmf on, the hub sends waiting mentions to the
+# recipient's LXMF client (Sideband, MeshChat, NomadNet, the mobile
+# app), which surfaces them like any other message. No RRC client
+# changes.
+#
+# Two routes are tried, in this order:
+#
+#   1. DIRECT to the recipient's lxmf.delivery destination, waiting for
+#      their own delivery proof. This is the one that usually works, and
+#      the only one that proves anything: leaving a room is not leaving
+#      the mesh, and an LXMF client is typically a background service
+#      that is still there after the RRC app is closed.
+#   2. STORE-AND-FORWARD via a propagation node, held until the
+#      recipient's client next syncs.
+#
+# The address is derived from the public key the peer proved when it
+# last connected, so nobody has to register anything. This assumes a
+# peer uses the same identity for RRC and for LXMF — true of
+# reticulum-mobile-app, not guaranteed in general. When neither route
+# confirms delivery the mention simply stays queued for their next RRC
+# session, so the worst case is seeing it twice.
+#
+# Requires mention_notify = true.
+mention_lxmf = false
+
+# Pin a propagation node by its lxmf.propagation destination hash (32
+# hex characters). Unset = auto-select.
+#
+# Pin one when you actually know one — your own node, or your
+# community's. A pinned node is a trust decision the hub will not
+# quietly fall back from, and it is the only way to be sure the message
+# is waiting somewhere your users' clients actually sync from.
+lxmf_propagation_node = ""
+
+# How many auto-selected propagation nodes one notification is left
+# with. Ignored when lxmf_propagation_node is pinned. (default 2, max 5)
+#
+# More than one because nothing in an announce says which node a given
+# recipient syncs from, so a single pick out of the dozens announcing on
+# a public mesh is close to a guess — and a message parked on the wrong
+# node is never seen. Copies cost you airtime and cost the recipient
+# nothing: LXMF dedupes on message_id, so a message that arrives twice
+# is shown once. This is the FALLBACK route, reached only after direct
+# delivery has already failed.
+lxmf_propagation_fanout = 2
 
 [hub.limits]
 # Client-facing limits advertised in WELCOME and enforced hub-side.

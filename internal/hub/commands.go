@@ -4,9 +4,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
+	"github.com/thatSFguy/reticulum-relay-chat/internal/history"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/roomreg"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
@@ -59,6 +62,10 @@ func (s *Session) handleCommand(trimmed, _, room string) {
 		s.cmdBan(parts, room)
 	case "invite":
 		s.cmdInvite(parts, room)
+	case "history":
+		s.cmdHistory(parts, room)
+	case "notify":
+		s.cmdNotify(parts, room)
 	default:
 		s.sendError(roomPtr(room), "unrecognized command")
 	}
@@ -1086,4 +1093,202 @@ func (s *Session) cmdInvite(parts []string, room string) {
 	}
 	h.mu.Unlock()
 	s.sendNotice(roomPtr(room), "invite removed in "+target)
+}
+
+// historyPullIntervalMs is the minimum gap between one session's
+// /history requests. A join replay is small and self-limiting; a pull
+// is neither, so it gets its own throttle on top of the shared token
+// bucket.
+const historyPullIntervalMs = 15_000
+
+// cmdHistory serves a client more of a room's transcript than the join
+// replay carried, and lets a room operator purge it.
+//
+//	/history [room] [count]
+//	/history purge <room>
+//
+// It needs nothing from the client but the ability to send text, which
+// is the point: a slash command is an ordinary MSG body, so every
+// deployed RRC client already supports this without being changed.
+func (s *Session) cmdHistory(parts []string, room string) {
+	h := s.hub
+	if !h.historyEnabled() {
+		s.sendNotice(roomPtr(room), "this hub does not retain history")
+		return
+	}
+
+	if len(parts) >= 2 && strings.EqualFold(parts[1], "purge") {
+		s.historyPurge(parts, room)
+		return
+	}
+
+	target := room
+	if len(parts) >= 2 {
+		target = parts[1]
+	}
+	if target == "" {
+		s.sendNotice(nil, "usage: /history [room] [count]")
+		return
+	}
+	if err := s.validRoom(target); err != nil {
+		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
+		return
+	}
+
+	count := h.cfg.HistoryPullCount
+	if len(parts) >= 3 {
+		n, err := strconv.Atoi(parts[2])
+		if err != nil || n <= 0 {
+			s.sendNotice(roomPtr(room), "usage: /history [room] [count]")
+			return
+		}
+		if n < count {
+			count = n
+		}
+	}
+
+	// Throttle before reading anything. One inbound MSG costs the
+	// client a single token from a 240/min bucket and can make the hub
+	// emit HistoryPullCount messages / HistoryPullBytes of traffic —
+	// roughly a 16 KB answer to a 30-byte question. Every other bound
+	// in this feature caps one call; this one caps the rate, which is
+	// what matters on a hub whose clients may be a LoRa link away.
+	now := h.now()
+	s.mu.Lock()
+	last := s.lastHistoryPullMs
+	ready := last == 0 || now-last >= historyPullIntervalMs
+	if ready {
+		s.lastHistoryPullMs = now
+	}
+	s.mu.Unlock()
+	if !ready {
+		wait := (historyPullIntervalMs - (now - last) + 999) / 1000
+		s.sendNotice(roomPtr(room), fmt.Sprintf("history is rate limited; try again in %ds", wait))
+		return
+	}
+
+	// Membership is the authorization: joining already cleared the
+	// room's key, invite and ban checks, so "you may read what was said
+	// here" reduces to "you are in here". Re-deriving those checks
+	// against a transcript would be a second, divergent copy of the
+	// join gate.
+	h.mu.Lock()
+	r := h.roomLocked(target)
+	member := r != nil && r.hasMember(s)
+	h.mu.Unlock()
+	if !member {
+		s.sendError(roomPtr(target), "join the room to read its history")
+		return
+	}
+
+	if n := s.replayTo(target, history.Query{
+		Limit:    count,
+		MaxBytes: h.cfg.HistoryPullBytes,
+		Since:    time.Now().Add(-h.cfg.HistoryRetention.Duration),
+	}); n == 0 {
+		s.sendNotice(roomPtr(target), "no history for "+target)
+	}
+}
+
+// historyPurge drops a room's transcript on an operator's say-so.
+func (s *Session) historyPurge(parts []string, room string) {
+	h := s.hub
+	if len(parts) < 3 {
+		s.sendNotice(roomPtr(room), "usage: /history purge <room>")
+		return
+	}
+	target := parts[2]
+	if err := s.validRoom(target); err != nil {
+		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
+		return
+	}
+
+	h.mu.Lock()
+	serverOp := h.isServerOp(s.identity())
+	r := h.roomLocked(target)
+	authorized := r != nil && r.isOp(s.identityHex(), serverOp)
+	h.mu.Unlock()
+	if !authorized {
+		s.sendError(roomPtr(target), "not authorized")
+		return
+	}
+
+	h.dropHistory(target)
+	h.log.Printf("%s purged the history of #%s", shortHash(s.identity()), target)
+	s.sendNotice(roomPtr(target), "history for "+target+" purged")
+}
+
+// cmdNotify controls whether this identity is told about mentions it
+// missed.
+//
+//	/notify            — report the current setting
+//	/notify on|off     — change it
+//
+// Consent matters here in a way it does not for the rest of the hub:
+// a mention notification can leave this hub entirely and arrive in
+// somebody's LXMF client, so anyone must be able to switch it off
+// without an operator's help.
+func (s *Session) cmdNotify(parts []string, room string) {
+	h := s.hub
+	if !h.cfg.MentionNotify {
+		s.sendNotice(roomPtr(room), "this hub does not send mention notifications")
+		return
+	}
+	idHex := s.identityHex()
+	if idHex == "" {
+		s.sendError(roomPtr(room), "identify first")
+		return
+	}
+
+	if len(parts) < 2 {
+		h.mu.Lock()
+		optOut := false
+		if p, ok := h.peers[idHex]; ok {
+			optOut = p.NotifyOptOut
+		}
+		h.mu.Unlock()
+		state := "on"
+		if optOut {
+			state = "off"
+		}
+		s.sendNotice(roomPtr(room), "mention notifications are "+state+" (use /notify on|off)")
+		return
+	}
+
+	var optOut bool
+	switch strings.ToLower(parts[1]) {
+	case "on", "yes", "enable":
+		optOut = false
+	case "off", "no", "disable":
+		optOut = true
+	default:
+		s.sendNotice(roomPtr(room), "usage: /notify on|off")
+		return
+	}
+
+	h.mu.Lock()
+	p, ok := h.peers[idHex]
+	if !ok {
+		h.mu.Unlock()
+		// Only an identified peer has a directory entry, and only a
+		// directory entry can be reached later — so there is nothing to
+		// set a preference on.
+		s.sendError(roomPtr(room), "identify first")
+		return
+	}
+	p.NotifyOptOut = optOut
+	if optOut {
+		// Turning notifications off discards what is already waiting.
+		// Holding them would deliver, on the next connection, exactly
+		// the thing that was just declined.
+		p.Mentions = nil
+	}
+	h.peersDirty = true
+	h.mu.Unlock()
+
+	if optOut {
+		s.sendNotice(roomPtr(room), "mention notifications off; anything pending was discarded")
+	} else {
+		s.sendNotice(roomPtr(room), "mention notifications on")
+	}
 }

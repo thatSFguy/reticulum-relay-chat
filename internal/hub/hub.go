@@ -11,10 +11,14 @@ import (
 	"context"
 	"encoding/hex"
 	"log"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
+	"github.com/thatSFguy/reticulum-relay-chat/internal/history"
+	"github.com/thatSFguy/reticulum-relay-chat/internal/peerreg"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/roomreg"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
@@ -29,6 +33,11 @@ type Link interface {
 	// PeerIdentityHash returns the client's 16-byte verified RNS identity
 	// hash, or nil if the client has not identified yet.
 	PeerIdentityHash() []byte
+	// PeerPublicKey returns the client's 64-byte verified RNS public key
+	// (X25519 public || Ed25519 public), or nil if the client has not
+	// identified yet. The hash above identifies a peer; only the key can
+	// address one once its link is gone — see internal/lxmfaddr.
+	PeerPublicKey() []byte
 	// SendResource delivers a large payload to the client as an RNS
 	// Resource (the hub has already sent the matching RESOURCE_ENVELOPE).
 	// Returns an error when resource transfer is unavailable — the hub
@@ -58,6 +67,23 @@ type Hub struct {
 	mu       sync.Mutex
 	rooms    map[string]*Room
 	sessions map[*Session]struct{}
+
+	// history retains room transcripts for the join replay and /history.
+	// nil when the operator has not enabled it, which every call site
+	// treats as "no history" rather than an error.
+	history *history.Store
+
+	// peers is the directory of identities this hub has met: their keys,
+	// their last nickname, and any mentions waiting for them. Keyed by
+	// identity hex.
+	peers      map[string]*peerreg.Peer
+	peersDirty bool // pending peers.toml write, flushed on the prune timer
+
+	// notifier, when set, can reach a peer whose link is gone. lastPush
+	// throttles per-peer attempts; it is in-memory only, so a restart
+	// retries rather than losing a notification.
+	notifier OfflineNotifier
+	lastPush map[string]time.Time
 
 	trusted map[string]struct{} // server-op identity hashes (hex)
 	banned  map[string]struct{} // config-banned ∪ kline hashes (hex)
@@ -94,6 +120,8 @@ func New(identityHash []byte, cfg config.HubConfig, logger *log.Logger) *Hub {
 		startedAt:    time.Now().UnixMilli(),
 		rooms:        make(map[string]*Room),
 		sessions:     make(map[*Session]struct{}),
+		peers:        make(map[string]*peerreg.Peer),
+		lastPush:     make(map[string]time.Time),
 		trusted:      make(map[string]struct{}),
 		banned:       make(map[string]struct{}),
 		klines:       make(map[string]struct{}),
@@ -101,7 +129,96 @@ func New(identityHash []byte, cfg config.HubConfig, logger *log.Logger) *Hub {
 	h.reloadTrust()
 	h.loadKlines()
 	h.loadRegistry()
+	h.ensureDefaultRooms()
+	h.openHistory()
+	h.loadPeers()
 	return h
+}
+
+// loadPeers reads the peer directory. As with the room registry, a file
+// that will not load leaves the hub running with an empty directory
+// rather than refusing to start: mention notification is a convenience,
+// and a hub that cannot remember people can still relay for them.
+func (h *Hub) loadPeers() {
+	if !h.cfg.MentionNotify {
+		return
+	}
+	peers, err := peerreg.Load(h.cfg.PeerRegistryPath)
+	if err != nil {
+		h.log.Printf("peers: starting empty — %v", err)
+		return
+	}
+	h.peers = peers
+	if len(peers) > 0 {
+		h.log.Printf("peers: loaded %d known identities from %s", len(peers), h.cfg.PeerRegistryPath)
+	}
+}
+
+// flushPeers persists the directory when something changed.
+func (h *Hub) flushPeers() {
+	if !h.cfg.MentionNotify {
+		return
+	}
+	h.mu.Lock()
+	if !h.peersDirty {
+		h.mu.Unlock()
+		return
+	}
+	snapshot := make(map[string]*peerreg.Peer, len(h.peers))
+	for id, p := range h.peers {
+		cp := *p
+		cp.PublicKey = append([]byte(nil), p.PublicKey...)
+		cp.Mentions = append([]peerreg.Mention(nil), p.Mentions...)
+		snapshot[id] = &cp
+	}
+	h.peersDirty = false
+	h.mu.Unlock()
+
+	if err := peerreg.Save(h.cfg.PeerRegistryPath, snapshot); err != nil {
+		h.log.Printf("peers: save failed: %v", err)
+		h.mu.Lock()
+		h.peersDirty = true // retry on the next flush
+		h.mu.Unlock()
+	}
+}
+
+// mentionQueueLimit is how many mentions may wait for one peer.
+func (h *Hub) mentionQueueLimit() int {
+	if h.cfg.MaxPendingMentions > 0 {
+		return h.cfg.MaxPendingMentions
+	}
+	return 20
+}
+
+// mentionSnippetBytes is how much of a message a notification quotes.
+func (h *Hub) mentionSnippetBytes() int {
+	if h.cfg.MentionSnippetBytes > 0 {
+		return h.cfg.MentionSnippetBytes
+	}
+	return 140
+}
+
+// openHistory attaches the transcript store when the operator enabled
+// it. A store that will not open is logged and left nil: a hub that
+// cannot write history is still a working hub, and refusing to start
+// would take a room down over a feature that is meant to be optional.
+func (h *Hub) openHistory() {
+	if !h.cfg.HistoryEnabled {
+		return
+	}
+	st, err := history.Open(h.cfg.HistoryPath, history.Options{
+		Retention:       h.cfg.HistoryRetention.Duration,
+		MaxBytesPerRoom: h.cfg.HistoryMaxBytesPerRoom,
+		MaxTotalBytes:   h.cfg.HistoryMaxTotalBytes,
+		MaxRecordBytes:  h.cfg.Limits.MaxMsgBodyBytes + 512, // body plus record framing
+	})
+	if err != nil {
+		h.log.Printf("history: disabled — %v", err)
+		return
+	}
+	h.history = st
+	h.log.Printf("history: retaining %s of room transcript in %s",
+		h.cfg.HistoryRetention.Duration, h.cfg.HistoryPath)
 }
 
 // reloadTrust rebuilds the trusted/banned sets from config. The kline set
@@ -157,6 +274,72 @@ func (h *Hub) loadRegistry() {
 	for name, rec := range recs {
 		h.rooms[name] = roomFromRecord(name, rec)
 	}
+}
+
+// ensureDefaultRooms creates the rooms every visitor should find
+// already there, so a new hub is somewhere to arrive rather than an
+// empty prompt.
+//
+// Registered, because that is what makes a room real when it is empty:
+// /list shows only registered rooms, and an unregistered one is dropped
+// the moment its last member parts (dropRoomIfEmptyLocked), taking its
+// transcript with it. A default room that evaporated between visitors
+// would not be a default room.
+//
+// An existing room of the same name is left completely alone. It may
+// carry a topic, operators, modes and bans that somebody set
+// deliberately, and none of that is ours to reset on a restart — the
+// point here is only that the room EXISTS.
+func (h *Hub) ensureDefaultRooms() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, raw := range h.cfg.DefaultRooms {
+		name, ok := h.normalizeDefaultRoom(raw)
+		if !ok {
+			continue
+		}
+		if _, exists := h.rooms[name]; exists {
+			continue
+		}
+		r := newRoom(name)
+		// No founder and no ops: the room belongs to the hub, not to
+		// whoever arrives first. Server operators can administer any
+		// room already, so this is not ownerless in practice.
+		r.registered = true
+		r.lastUsedTS = h.nowUnix()
+		h.rooms[name] = r
+		h.markRegistryDirtyLocked()
+		h.log.Printf("room created: #%s (hub default)", name)
+	}
+}
+
+// normalizeDefaultRoom cleans one configured name and rejects one the
+// hub could not have accepted over JOIN anyway.
+//
+// The leading '#' is stripped because it is not part of a room name —
+// clients send "lobby" and only the display adds the '#' — but an
+// operator writing default_rooms = ["#lobby"] means the obvious thing
+// and should get it rather than a room literally called "#lobby".
+//
+// The UTF-8 and length checks mirror handleJoin's. They matter more
+// here, not less: this name goes into rooms.toml at startup, and an
+// invalid one would make the registry unloadable on the next boot.
+func (h *Hub) normalizeDefaultRoom(raw string) (string, bool) {
+	name := strings.TrimSpace(raw)
+	name = strings.TrimPrefix(name, "#")
+	if name == "" {
+		return "", false
+	}
+	if !utf8.ValidString(name) {
+		h.log.Printf("hub: ignoring default room %q — not valid UTF-8", raw)
+		return "", false
+	}
+	if h.limits.MaxRoomNameBytes > 0 && len(name) > h.limits.MaxRoomNameBytes {
+		h.log.Printf("hub: ignoring default room %q — exceeds max_room_name_bytes (%d)",
+			raw, h.limits.MaxRoomNameBytes)
+		return "", false
+	}
+	return name, true
 }
 
 // nowUnix returns the current wall clock in unix seconds.
@@ -321,6 +504,9 @@ func (h *Hub) Start(ctx context.Context) {
 	if h.cfg.RoomRegistryPruneInterval.Duration > 0 && h.cfg.RoomRegistryPruneAfter.Duration > 0 {
 		go h.pruneLoop(ctx)
 	}
+	if h.cfg.MentionNotify && h.cfg.MentionPushInterval.Duration > 0 {
+		go h.mentionPushLoop(ctx)
+	}
 	go h.reaperLoop(ctx)
 }
 
@@ -337,6 +523,10 @@ func (h *Hub) Stop() {
 	h.mu.Lock()
 	h.persistKlinesLocked()
 	h.mu.Unlock()
+	// The peer directory holds mentions nobody has collected yet —
+	// losing it on shutdown would drop notifications that are still
+	// owed.
+	h.flushPeers()
 }
 
 // pingLoop sends hub keepalive PINGs and tears down links with a
@@ -419,6 +609,35 @@ func (h *Hub) doPrune() {
 	h.mu.Unlock()
 	for _, name := range pruned {
 		h.log.Printf("hub: pruned stale registered room #%s", name)
+	}
+	h.pruneHistory()
+	h.pinPeerAddresses()
+	h.flushPeers()
+}
+
+// mentionPushLoop delivers waiting mentions on its own schedule.
+//
+// Previously this rode the room-registry prune timer, which defaults to
+// an hour — so the first delivery attempt for a queued mention could be
+// an hour after the message was sent. A notification that late is not a
+// notification. Pruning stale rooms is housekeeping on a slow clock;
+// reaching somebody who was named is the feature, and it needs a fast
+// one.
+func (h *Hub) mentionPushLoop(ctx context.Context) {
+	t := time.NewTicker(h.cfg.MentionPushInterval.Duration)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			h.pushPendingMentions()
+			// The queue only changes here, so it is also the right
+			// place to persist it — otherwise a mention delivered (or
+			// newly queued) sits unwritten until the hourly prune, and
+			// a restart in between replays or loses it.
+			h.flushPeers()
+		}
 	}
 }
 

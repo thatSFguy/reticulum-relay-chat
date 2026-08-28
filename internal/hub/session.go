@@ -5,6 +5,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/thatSFguy/reticulum-relay-chat/internal/history"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
 
@@ -24,6 +25,20 @@ type Session struct {
 	bucket   *tokenBucket
 
 	pingAwaitMs int64 // 0 = not awaiting a PONG
+
+	// lastAliveMs is the hub's clock when this peer was last heard
+	// from — any inbound frame at all, since every one of them had to
+	// cross a live link to get here.
+	//
+	// Room membership is NOT evidence of presence. A client that closes
+	// its app leaves the link to rot, and the hub goes on listing it as
+	// a member until a PING goes unanswered for ping_timeout — up to
+	// ping_interval + ping_timeout of phantom presence. Anything that
+	// treats "in the room" as "received the message" is wrong for that
+	// whole window. See mentionLivenessProven.
+	lastAliveMs int64
+
+	lastHistoryPullMs int64 // 0 = never; throttles /history (see cmdHistory)
 
 	expectations []*resourceExpectation
 }
@@ -68,6 +83,10 @@ func (h *Hub) NewSession(link Link) *Session {
 
 func (s *Session) identity() []byte { return s.link.PeerIdentityHash() }
 
+// PeerPublicKey returns the 64-byte public key this session's client
+// proved when it identified, or nil if it has not identified yet.
+func (s *Session) PeerPublicKey() []byte { return s.link.PeerPublicKey() }
+
 func (s *Session) identityHex() string {
 	if id := s.identity(); id != nil {
 		return hex.EncodeToString(id)
@@ -89,6 +108,13 @@ func (s *Session) OnInbound(frame []byte) {
 	}
 	h.statInc(&h.stats.pktsIn)
 	h.statAdd(&h.stats.bytesIn, int64(len(frame)))
+
+	// Heard from. Recorded before the rate limiter and the decoder: even
+	// a malformed or throttled frame is proof the peer is still on the
+	// other end, which is all this timestamp claims.
+	s.mu.Lock()
+	s.lastAliveMs = h.now()
+	s.mu.Unlock()
 
 	// Rate limit BEFORE decode (audit A19): CBOR decoding is itself
 	// attacker-driven work, so a flood of malformed frames must be
@@ -232,6 +258,11 @@ func (s *Session) handleHello(env *rrc.Envelope) {
 
 	// Greeting (MOTD) after WELCOME.
 	s.sendGreeting()
+
+	// File this identity — its key is what makes it addressable later —
+	// then hand over anything that arrived while it was away.
+	s.rememberPeer()
+	s.flushMentions()
 }
 
 // resetForReHello removes the peer from all rooms and clears its state.
@@ -401,6 +432,24 @@ func (s *Session) handleJoin(env *rrc.Envelope) {
 		topicWord = "(none)"
 	}
 	s.sendNotice(&room, "room "+room+": "+regWord+"; mode="+modeStr+"; topic="+topicWord)
+
+	// A freshly created unregistered room starts empty: its name may
+	// have been used before by a room that has since died, and RRC's
+	// contract is that such a room took its conversation with it.
+	if created && !registered {
+		h.dropHistory(room)
+		return
+	}
+	// Otherwise catch the joiner up. Deliberately a small taste of the
+	// conversation rather than the whole window — the client may be on a
+	// link where a week of backlog is minutes of airtime — and /history
+	// is there for anyone who wants more.
+	if h.cfg.HistoryReplayCount > 0 {
+		s.replayTo(room, history.Query{
+			Limit:    h.cfg.HistoryReplayCount,
+			MaxBytes: h.cfg.HistoryReplayBytes,
+		})
+	}
 }
 
 // --- PART -------------------------------------------------------------
@@ -549,6 +598,10 @@ func (s *Session) handleMsg(env *rrc.Envelope, typ int) {
 	case rrc.TAction:
 		h.statInc(&h.stats.actionsFwd)
 	}
+	// Retain what the room actually saw — env carries the rewritten
+	// K_SRC and the normalized nick from just above.
+	h.recordMessage(room, env)
+	h.noteMentions(room, env)
 }
 
 // --- PING / PONG ------------------------------------------------------
