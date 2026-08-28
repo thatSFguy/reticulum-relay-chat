@@ -215,13 +215,16 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 	}
 	ensureAddressable(n.svc.transport, known)
 
-	// Whether we can stamp depends on having heard this peer announce:
-	// the §5.7.4 stamp_cost lives in that announce's app_data and
-	// nothing else carries it. Decide before sending, because
-	// ensureAddressable may just have installed a stub that has none.
-	stamped := false
+	// Whether we can meet this peer's §5.7.4 stamp demand depends on
+	// having heard them announce: the cost lives in that announce's
+	// app_data and nothing else carries it. Note this is "we know their
+	// policy", not "we ground a stamp" — most peers announce a cost of
+	// zero, and knowing that is knowing we have satisfied it. Decided
+	// before sending, because ensureAddressable may just have installed
+	// a stub that carries no app_data at all.
+	knowStampPolicy := false
 	if cached := n.svc.transport.Recall(known.DestHash); cached != nil && len(cached.AppData) > 0 {
-		stamped = true
+		knowStampPolicy = true
 	}
 
 	// Route 1: direct. Blocks for the recipient's own delivery proof, so
@@ -234,7 +237,7 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 	directErr := n.sendDirect(known.DestHash, title, body)
 	if directErr == nil {
 		n.svc.log.Printf("lxmf: delivered to %x directly (proof received)", known.DestHash[:4])
-		if !stamped {
+		if !knowStampPolicy {
 			return fmt.Errorf("%w: %x has never announced", hub.ErrDeliveredUnconfirmed, known.DestHash[:4])
 		}
 		return nil
@@ -273,8 +276,13 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 			continue
 		}
 		uploaded++
+		// The FULL node hash, not a prefix. Store-and-forward only
+		// completes when the recipient fetches, so "which node is
+		// holding this?" is the first question when a notification is
+		// accepted here and never arrives — and answering it means
+		// going to that node, which a four-byte prefix cannot address.
 		n.svc.log.Printf("lxmf: uploaded notification for %x to node %x",
-			known.DestHash[:4], node[:4])
+			known.DestHash[:4], node)
 	}
 	if uploaded == 0 {
 		return fmt.Errorf("no route to %x: direct: %v; propagation: %w",
@@ -285,7 +293,7 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 	// whatever the stamp situation — the fallback is not something to
 	// spend on an acknowledgement that does not mean what we want it to
 	// mean. See hub.ErrDeliveredUnconfirmed.
-	if !stamped {
+	if !knowStampPolicy {
 		return fmt.Errorf("%w: %x has never announced", hub.ErrDeliveredUnconfirmed, known.DestHash[:4])
 	}
 	return fmt.Errorf("%w: uploaded to %d node(s), no receipt from the recipient",
