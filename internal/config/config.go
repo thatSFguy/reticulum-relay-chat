@@ -190,11 +190,25 @@ func defaults() Config {
 			// as ordinary replayed messages and a mention notification
 			// arrives somewhere else entirely. Operators are expected
 			// to replace this with their own words.
-			Greeting:                      "Welcome. This is rrc-hub by thatSFguy - RRC, plus some things a standard hub does not do:\n  - rooms open with the recent conversation, not a blank screen\n  - name someone with @nick while they are away and the hub delivers it to their LXMF inbox, so they actually find out\nNone of it needs a special client - your existing one already speaks everything used here.\n/join #lobby to start, /help for commands.",
-			IdentityPath:                  "hub_identity",
-			DestName:                      "rrc.hub",
-			AnnounceOnStart:               true,
-			AnnounceInterval:              Duration{5 * time.Minute},
+			Greeting:        "Welcome. This is rrc-hub by thatSFguy - RRC, plus some things a standard hub does not do:\n  - rooms open with the recent conversation, not a blank screen\n  - name someone with @nick while they are away and the hub delivers it to their LXMF inbox, so they actually find out\nNone of it needs a special client - your existing one already speaks everything used here.\n/join #lobby to start, /help for commands.",
+			IdentityPath:    "hub_identity",
+			DestName:        "rrc.hub",
+			AnnounceOnStart: true,
+			// 30 minutes, not 5. A hub announces TWO destinations
+			// (rrc.hub and lxmf.delivery), so the interval is really
+			// two packets flooded across the mesh per tick, forever —
+			// and upstream RNS transport nodes police this: an
+			// interface with announce_rate_target set counts violations
+			// per destination and, past announce_rate_grace, applies
+			// announce_rate_penalty (RNS/Transport.py:2219-2240).
+			// Sustained 5-minute announces on a public node earned
+			// exactly that treatment during testing.
+			//
+			// Nothing needs the faster rate. Path discovery for a
+			// client that has never heard the hub goes through a path
+			// request, not the periodic announce, and cached paths
+			// outlive 30 minutes comfortably.
+			AnnounceInterval:              Duration{30 * time.Minute},
 			RoomRegistryPruneAfter:        Duration{30 * 24 * time.Hour},
 			RoomRegistryPruneInterval:     Duration{time.Hour},
 			MentionPushInterval:           Duration{time.Minute},

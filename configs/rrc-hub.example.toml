@@ -44,9 +44,21 @@ dest_name = "rrc.hub"
 # the first announce waits a full announce_interval. (default true)
 announce_on_start = true
 
-# How often the hub re-announces its rrc.hub destination so relays keep
-# a fresh path and clients can discover it. (default "5m")
-announce_interval = "5m"
+# How often the hub re-announces itself so relays keep a fresh path.
+# (default "30m")
+#
+# Be careful lowering this. The hub announces TWO destinations per tick
+# (rrc.hub and lxmf.delivery), so this is two packets flooded across the
+# mesh every interval, forever — and public transport nodes police it.
+# An RNS interface with announce_rate_target set counts violations per
+# destination and applies a penalty past announce_rate_grace, which in
+# practice means your hub gets throttled or dropped by the node you rely
+# on. Sustained 5-minute announces earned exactly that during testing.
+#
+# You do not need it faster. A client that has never heard the hub finds
+# it with a path request, not by waiting for an announce, and cached
+# paths outlive 30 minutes comfortably.
+announce_interval = "30m"
 
 # Hex identity hashes of server operators. A trusted identity may run
 # server-op commands (/reload, /stats, /kline, ...). (default [])
