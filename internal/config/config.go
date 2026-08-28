@@ -34,7 +34,22 @@ type HubConfig struct {
 	BannedIdentities  []string `toml:"banned_identities"`
 
 	// Persistence.
-	RoomRegistryPath          string   `toml:"room_registry_path"`
+	RoomRegistryPath string `toml:"room_registry_path"`
+	// DefaultRooms are created, registered, at every start so a brand
+	// new hub is not an empty prompt. Absent from the config means
+	// ["lobby"]; an explicit empty list means none.
+	//
+	// They are REGISTERED because that is what makes a room real when
+	// nobody is in it: /list only shows registered rooms, and an
+	// unregistered one is dropped the moment its last member parts,
+	// taking its transcript with it. A default room that evaporated
+	// between visitors would not be a default room.
+	//
+	// They get no founder and no operators. The room belongs to the
+	// hub, not to whoever happened to arrive first — server operators
+	// (hub.trusted) can already administer any room, so it is not
+	// ownerless in practice.
+	DefaultRooms              []string `toml:"default_rooms"`
 	KlinePath                 string   `toml:"kline_path"`
 	RoomRegistryPruneAfter    Duration `toml:"room_registry_prune_after"`
 	RoomRegistryPruneInterval Duration `toml:"room_registry_prune_interval"`
@@ -190,6 +205,7 @@ func defaults() Config {
 			MaxKnownPeers:                  2048,
 			MaxPendingMentions:             20,
 			MentionSnippetBytes:            140,
+			DefaultRooms:                   []string{"lobby"},
 			MentionLXMF:                    false,
 			LXMFPropagationFanout:          2,
 			Limits: LimitsConfig{

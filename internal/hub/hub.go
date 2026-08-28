@@ -11,8 +11,10 @@ import (
 	"context"
 	"encoding/hex"
 	"log"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/history"
@@ -127,6 +129,7 @@ func New(identityHash []byte, cfg config.HubConfig, logger *log.Logger) *Hub {
 	h.reloadTrust()
 	h.loadKlines()
 	h.loadRegistry()
+	h.ensureDefaultRooms()
 	h.openHistory()
 	h.loadPeers()
 	return h
@@ -271,6 +274,72 @@ func (h *Hub) loadRegistry() {
 	for name, rec := range recs {
 		h.rooms[name] = roomFromRecord(name, rec)
 	}
+}
+
+// ensureDefaultRooms creates the rooms every visitor should find
+// already there, so a new hub is somewhere to arrive rather than an
+// empty prompt.
+//
+// Registered, because that is what makes a room real when it is empty:
+// /list shows only registered rooms, and an unregistered one is dropped
+// the moment its last member parts (dropRoomIfEmptyLocked), taking its
+// transcript with it. A default room that evaporated between visitors
+// would not be a default room.
+//
+// An existing room of the same name is left completely alone. It may
+// carry a topic, operators, modes and bans that somebody set
+// deliberately, and none of that is ours to reset on a restart — the
+// point here is only that the room EXISTS.
+func (h *Hub) ensureDefaultRooms() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, raw := range h.cfg.DefaultRooms {
+		name, ok := h.normalizeDefaultRoom(raw)
+		if !ok {
+			continue
+		}
+		if _, exists := h.rooms[name]; exists {
+			continue
+		}
+		r := newRoom(name)
+		// No founder and no ops: the room belongs to the hub, not to
+		// whoever arrives first. Server operators can administer any
+		// room already, so this is not ownerless in practice.
+		r.registered = true
+		r.lastUsedTS = h.nowUnix()
+		h.rooms[name] = r
+		h.markRegistryDirtyLocked()
+		h.log.Printf("room created: #%s (hub default)", name)
+	}
+}
+
+// normalizeDefaultRoom cleans one configured name and rejects one the
+// hub could not have accepted over JOIN anyway.
+//
+// The leading '#' is stripped because it is not part of a room name —
+// clients send "lobby" and only the display adds the '#' — but an
+// operator writing default_rooms = ["#lobby"] means the obvious thing
+// and should get it rather than a room literally called "#lobby".
+//
+// The UTF-8 and length checks mirror handleJoin's. They matter more
+// here, not less: this name goes into rooms.toml at startup, and an
+// invalid one would make the registry unloadable on the next boot.
+func (h *Hub) normalizeDefaultRoom(raw string) (string, bool) {
+	name := strings.TrimSpace(raw)
+	name = strings.TrimPrefix(name, "#")
+	if name == "" {
+		return "", false
+	}
+	if !utf8.ValidString(name) {
+		h.log.Printf("hub: ignoring default room %q — not valid UTF-8", raw)
+		return "", false
+	}
+	if h.limits.MaxRoomNameBytes > 0 && len(name) > h.limits.MaxRoomNameBytes {
+		h.log.Printf("hub: ignoring default room %q — exceeds max_room_name_bytes (%d)",
+			raw, h.limits.MaxRoomNameBytes)
+		return "", false
+	}
+	return name, true
 }
 
 // nowUnix returns the current wall clock in unix seconds.

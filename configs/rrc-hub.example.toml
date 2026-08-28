@@ -51,6 +51,25 @@ banned_identities = []
 # registration persistence. (default "")
 room_registry_path = "rooms.toml"
 
+# Rooms that exist from the moment the hub starts, so the first person
+# to connect finds somewhere to be instead of an empty prompt.
+# (default ["lobby"] — set to [] for none)
+#
+# They are created REGISTERED, which is what makes a room real when
+# nobody is in it: /list shows only registered rooms, and an
+# unregistered room is dropped the moment its last member parts, taking
+# its transcript with it. A registered default room also means joiners
+# get history replay rather than a blank slate on every restart.
+#
+# They get no founder and no operators — the room belongs to the hub,
+# not to whoever arrives first. Anyone in trusted_identities can
+# administer it. A leading "#" is accepted and ignored.
+#
+# A room that already exists in rooms.toml is left exactly as it is;
+# this only ensures the room EXISTS, and never resets a topic, mode,
+# operator or ban somebody set deliberately.
+default_rooms = ["lobby"]
+
 # Path to the persisted kline list. Empty disables kline persistence.
 # (default "")
 kline_path = "klines.txt"
