@@ -19,6 +19,7 @@ import (
 	"github.com/thatSFguy/reticulum-go/rns"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/hub"
+	"github.com/thatSFguy/reticulum-relay-chat/internal/lxmfaddr"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
 
@@ -338,7 +339,16 @@ func (s *Service) bindPeer(linkID, pubKey []byte) {
 		pubKey: append([]byte(nil), pubKey...),
 	}
 	s.mu.Unlock()
-	s.log.Printf("link %x identified as %s (verified)", linkID[:4], hex.EncodeToString(idHash))
+	// reticulum-go has already logged the verification. What is worth
+	// adding is the part that is ours: the peer is now addressable when
+	// their link is gone, because the KEY was retained and not just the
+	// hash it reduces to.
+	if dest, err := lxmfaddr.DeliveryDest(pubKey); err == nil {
+		s.log.Printf("link %x bound to %s (reachable offline at lxmf.delivery %x)",
+			linkID[:4], hex.EncodeToString(idHash), dest)
+	} else {
+		s.log.Printf("link %x bound to %s", linkID[:4], hex.EncodeToString(idHash))
+	}
 }
 
 func (s *Service) peerIdentity(linkID []byte) []byte {
