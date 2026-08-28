@@ -73,6 +73,10 @@ type lxmfNotifier struct {
 	// fanout is how many propagation nodes one notification is left
 	// with when no node is pinned. See Config.LXMFPropagationFanout.
 	fanout int
+	// startedAt bounds how long a missing announce is forgiven as a
+	// cold cache rather than treated as a fault. See waitingCondition.
+	startedAt time.Time
+	now       func() time.Time
 }
 
 // newLXMFNotifier builds the notifier and registers the hub's own LXMF
@@ -105,10 +109,12 @@ func newLXMFNotifier(s *Service) (*lxmfNotifier, error) {
 	}
 
 	n := &lxmfNotifier{
-		svc:      s,
-		delivery: delivery,
-		nodes:    newPropNodes(s.log, s.transport, pinned),
-		fanout:   s.cfg.Hub.LXMFPropagationFanout,
+		svc:       s,
+		delivery:  delivery,
+		nodes:     newPropNodes(s.log, s.transport, pinned),
+		fanout:    s.cfg.Hub.LXMFPropagationFanout,
+		startedAt: time.Now(),
+		now:       time.Now,
 	}
 	// Learn nodes from announces. Even a pinned node benefits: the
 	// upload needs the node's announced app_data to know whether it is
@@ -289,12 +295,11 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 			known.DestHash[:4], node)
 	}
 	if uploaded == 0 {
-		if allWaiting && waitingCondition(directErr) {
-			// Nothing was refused; we are missing announces on both
-			// routes and have just asked for the paths. Treat it as
-			// "not yet" so the hub retries on the next tick instead of
-			// spending the peer's whole push interval waiting for a
-			// packet that is probably seconds away.
+		// Judged on the PROPAGATION route alone. The direct route
+		// failing is not evidence of anything wrong — an absent peer is
+		// exactly who this fallback exists for, and their delivery
+		// proof timing out is the normal way of discovering it.
+		if allWaiting && n.warmingUp() {
 			return fmt.Errorf("%w: %v (direct: %v)",
 				hub.ErrNotifierUnavailable, lastErr, directErr)
 		}
@@ -313,19 +318,33 @@ func (n *lxmfNotifier) NotifyAbsent(pubKey []byte, title, body string) error {
 		hub.ErrDeliveredUnconfirmed, uploaded)
 }
 
+// notifierWarmup is how long after start a missing announce is read as
+// a cold cache rather than a fault.
+//
+// The announce cache is in-memory only (there is no announces.json), so
+// a hub that has just restarted knows nothing about anybody — including
+// a propagation node its own operator pinned. Long enough to cover that
+// gap; short enough that a node which is genuinely gone stops being
+// retried every prune tick and falls back to the ordinary push
+// interval, instead of spending the mesh's airtime on a
+// misconfiguration forever.
+const notifierWarmup = 5 * time.Minute
+
+func (n *lxmfNotifier) warmingUp() bool {
+	return n.now().Sub(n.startedAt) < notifierWarmup
+}
+
 // waitingCondition reports an error that means "not yet" rather than
 // "no": the announce we need has not arrived, so there is no key to
-// encrypt with or no path to open a link over. Both send paths ask the
+// encrypt with and no path to open a link over. Both send paths ask the
 // network for the missing path before returning, which makes the next
-// attempt materially more likely to work — so this is a condition to
-// retry promptly, not one to spend a push interval on.
+// attempt materially more likely to work.
 //
-// It is a routine state, not an edge case. The announce cache is
-// in-memory only (there is no announces.json), so a hub that has just
-// restarted knows nothing about anybody — including a propagation node
-// its own operator pinned. Observed live: a pinned node failed with
-// ErrPropagationNodeUnknown 40 seconds after start, and the mention was
-// parked for half an hour over it.
+// Observed live, and the reason this exists: a pinned node failed with
+// ErrPropagationNodeUnknown 40 seconds after start, the path request
+// that failure triggered was answered 1.5 seconds later — and the
+// mention was parked for half an hour anyway, because the hub had
+// already spent the peer's push interval on it.
 func waitingCondition(err error) bool {
 	return errors.Is(err, lxmf.ErrPropagationNodeUnknown) ||
 		errors.Is(err, lxmf.ErrRecipientUnknown)

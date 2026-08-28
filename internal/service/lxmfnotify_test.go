@@ -2,9 +2,14 @@ package service
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"testing"
+	"time"
+
+	"github.com/thatSFguy/reticulum-go/lxmf"
 
 	"github.com/thatSFguy/reticulum-go/rns"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/lxmfaddr"
@@ -77,5 +82,51 @@ func TestAnUnheardPeerIsStillMadeAddressable(t *testing.T) {
 	}
 	if !bytes.Equal(got.PublicKey, id.PublicKey()) {
 		t.Error("restored entry carries the wrong public key")
+	}
+}
+
+// A missing announce is forgiven only while the cache could plausibly
+// still be cold. Past that, a pinned node that never answers is a
+// misconfiguration, and retrying it every prune tick forever would
+// spend the mesh's airtime on it.
+func TestTheNotYetConcessionExpires(t *testing.T) {
+	start := time.Now()
+	n := &lxmfNotifier{startedAt: start}
+	n.now = func() time.Time { return start }
+
+	if !n.warmingUp() {
+		t.Error("a notifier that just started must forgive a cold cache")
+	}
+	n.now = func() time.Time { return start.Add(notifierWarmup - time.Second) }
+	if !n.warmingUp() {
+		t.Error("still inside the warm-up window")
+	}
+	n.now = func() time.Time { return start.Add(notifierWarmup + time.Second) }
+	if n.warmingUp() {
+		t.Errorf("after %v a missing announce is a fault, not a cold cache", notifierWarmup)
+	}
+}
+
+// The errors that mean "the announce has not arrived yet" — the ones a
+// path request can fix — are distinguished from real refusals, which
+// nothing about waiting will change.
+func TestWaitingConditionSeparatesNotYetFromNo(t *testing.T) {
+	notYet := []error{lxmf.ErrPropagationNodeUnknown, lxmf.ErrRecipientUnknown}
+	for _, err := range notYet {
+		if !waitingCondition(fmt.Errorf("wrapped: %w", err)) {
+			t.Errorf("%v should be retried promptly", err)
+		}
+	}
+	no := []error{
+		lxmf.ErrPropagationNodeDisabled,
+		lxmf.ErrPropagationTransferTooLarge,
+		lxmf.ErrStampCostTooHigh,
+		lxmf.ErrDeliveryProofTimeout,
+		errors.New("link send: LRPROOF did not arrive before timeout"),
+	}
+	for _, err := range no {
+		if waitingCondition(err) {
+			t.Errorf("%v is a refusal or a real failure, not a cold cache", err)
+		}
 	}
 }
