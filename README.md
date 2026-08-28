@@ -110,9 +110,21 @@ identity, so a client cannot spoof another's messages.
 
 ## Deploy it
 
+> **This repository is currently private.** The download steps below
+> need access to it. Everything else — building from a checkout, the
+> config, the systemd unit — works regardless.
+
 ### 1. Get a binary
 
-Download from [Releases](https://github.com/thatSFguy/reticulum-relay-chat/releases).
+Grab the binary for your machine, plus the example config for that same
+version, from the [latest release](https://github.com/thatSFguy/reticulum-relay-chat/releases/latest):
+
+```sh
+gh release download --repo thatSFguy/reticulum-relay-chat \
+  -p 'rrc-hub-linux-arm64' -p 'rrc-hub.example.toml' -p 'SHA256SUMS'
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
 Static, no dependencies, no runtime to install:
 
 | Target | Asset |
@@ -136,9 +148,12 @@ go build -o rrc-hub ./cmd/rrc-hub
 ### 2. Write a config
 
 ```sh
-curl -O https://raw.githubusercontent.com/thatSFguy/reticulum-relay-chat/master/configs/rrc-hub.example.toml
-mv rrc-hub.example.toml rrc-hub.toml
+mv rrc-hub.example.toml rrc-hub.toml     # from the release, above
 ```
+
+Take the config from the same release as the binary. Config keys move
+between versions, and pairing a released binary with a config from a
+branch tip is how you end up debugging a key your build does not have.
 
 The example file documents every knob. A minimal hub with the
 interesting features on:
