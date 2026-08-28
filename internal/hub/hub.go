@@ -504,6 +504,9 @@ func (h *Hub) Start(ctx context.Context) {
 	if h.cfg.RoomRegistryPruneInterval.Duration > 0 && h.cfg.RoomRegistryPruneAfter.Duration > 0 {
 		go h.pruneLoop(ctx)
 	}
+	if h.cfg.MentionNotify && h.cfg.MentionPushInterval.Duration > 0 {
+		go h.mentionPushLoop(ctx)
+	}
 	go h.reaperLoop(ctx)
 }
 
@@ -609,8 +612,33 @@ func (h *Hub) doPrune() {
 	}
 	h.pruneHistory()
 	h.pinPeerAddresses()
-	h.pushPendingMentions()
 	h.flushPeers()
+}
+
+// mentionPushLoop delivers waiting mentions on its own schedule.
+//
+// Previously this rode the room-registry prune timer, which defaults to
+// an hour — so the first delivery attempt for a queued mention could be
+// an hour after the message was sent. A notification that late is not a
+// notification. Pruning stale rooms is housekeeping on a slow clock;
+// reaching somebody who was named is the feature, and it needs a fast
+// one.
+func (h *Hub) mentionPushLoop(ctx context.Context) {
+	t := time.NewTicker(h.cfg.MentionPushInterval.Duration)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			h.pushPendingMentions()
+			// The queue only changes here, so it is also the right
+			// place to persist it — otherwise a mention delivered (or
+			// newly queued) sits unwritten until the hourly prune, and
+			// a restart in between replays or loses it.
+			h.flushPeers()
+		}
+	}
 }
 
 // reaperLoop drops expired pending resource expectations.

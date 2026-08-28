@@ -82,17 +82,36 @@ room_registry_prune_after = "720h"
 # How often the prune sweep runs. (default "1h")
 room_registry_prune_interval = "1h"
 
+# How often the hub tries to deliver mentions waiting for peers who are
+# not connected. (default "60s"; 0 disables the push entirely and leaves
+# mentions to be delivered over RRC on the peer's next visit)
+#
+# Separate from room_registry_prune_interval above on purpose. These
+# once shared a timer, so with its 1h default a hub would sit on
+# somebody's message for up to an hour before the FIRST delivery
+# attempt. Pruning stale rooms is housekeeping on a slow clock; this is
+# the feature, and it needs a fast one.
+mention_push_interval = "60s"
+
 # Time-to-live for a room invite created by /invite. (default "15m")
 room_invite_timeout = "15m"
 
 # Include the member-hash list in JOINED/PARTED broadcasts. (default false)
 include_joined_member_list = false
 
-# Hub-initiated keepalive. A zero ping_interval disables hub PINGs; a
-# zero ping_timeout disables tearing a link down for a missing PONG.
-# (defaults: ping_interval "0s", ping_timeout "0s")
-ping_interval = "0s"
-ping_timeout = "0s"
+# Hub-initiated keepalive. (defaults: ping_interval "30s",
+# ping_timeout "60s")
+#
+# LEAVE THESE ON unless you know why you are turning them off. A zero
+# ping_interval disables hub PINGs *and* a zero ping_timeout disables
+# tearing a link down for a missing PONG — so the hub never learns that
+# a client vanished and lists dead peers as present in a room forever.
+# Everything that asks "is this person here?" is then wrong, and
+# mention_notify worst of all: the people most in need of an offline
+# notification (dropped link, killed app, dead battery) are exactly the
+# ones the hub still believes are sitting in the room.
+ping_interval = "30s"
+ping_timeout = "60s"
 
 # Allow large payloads to transfer as RNS Resources (greeting/MOTD over
 # 512 bytes, inbound RESOURCE_ENVELOPE handling). (default true)

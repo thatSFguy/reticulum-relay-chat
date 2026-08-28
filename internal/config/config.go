@@ -53,7 +53,18 @@ type HubConfig struct {
 	KlinePath                 string   `toml:"kline_path"`
 	RoomRegistryPruneAfter    Duration `toml:"room_registry_prune_after"`
 	RoomRegistryPruneInterval Duration `toml:"room_registry_prune_interval"`
-	RoomInviteTimeout         Duration `toml:"room_invite_timeout"`
+
+	// MentionPushInterval is how often the hub tries to deliver mentions
+	// waiting for peers who are not connected.
+	//
+	// It has its own timer because it used to share the room-registry
+	// prune timer, whose default is an hour — so a hub with mention
+	// notification switched on would sit on somebody's message for up
+	// to an hour before the first delivery attempt, which is not a
+	// notification. The two jobs have nothing to do with each other:
+	// pruning stale rooms is housekeeping, and this is the feature.
+	MentionPushInterval Duration `toml:"mention_push_interval"`
+	RoomInviteTimeout   Duration `toml:"room_invite_timeout"`
 
 	// Behavior.
 	IncludeJoinedMemberList bool `toml:"include_joined_member_list"`
@@ -171,22 +182,33 @@ func (d Duration) MarshalText() ([]byte, error) {
 func defaults() Config {
 	return Config{
 		Hub: HubConfig{
-			Name:                           "RRC Hub",
-			Version:                        "rrc-hub-go/0.1.0",
-			IdentityPath:                   "hub_identity",
-			DestName:                       "rrc.hub",
-			AnnounceOnStart:                true,
-			AnnounceInterval:               Duration{5 * time.Minute},
-			RoomRegistryPruneAfter:         Duration{30 * 24 * time.Hour},
-			RoomRegistryPruneInterval:      Duration{time.Hour},
-			RoomInviteTimeout:              Duration{15 * time.Minute},
-			IncludeJoinedMemberList:        false,
-			MaxSessions:                    256,
-			MaxRooms:                       512,
-			MaxRegisteredRoomsPerIdentity:  16,
-			MaxRoomAclEntries:              256,
-			PingInterval:                   Duration{0},
-			PingTimeout:                    Duration{0},
+			Name:                          "RRC Hub",
+			Version:                       "rrc-hub-go/0.1.0",
+			IdentityPath:                  "hub_identity",
+			DestName:                      "rrc.hub",
+			AnnounceOnStart:               true,
+			AnnounceInterval:              Duration{5 * time.Minute},
+			RoomRegistryPruneAfter:        Duration{30 * 24 * time.Hour},
+			RoomRegistryPruneInterval:     Duration{time.Hour},
+			MentionPushInterval:           Duration{time.Minute},
+			RoomInviteTimeout:             Duration{15 * time.Minute},
+			IncludeJoinedMemberList:       false,
+			MaxSessions:                   256,
+			MaxRooms:                      512,
+			MaxRegisteredRoomsPerIdentity: 16,
+			MaxRoomAclEntries:             256,
+			// Keepalive ON by default. These used to default to 0,
+			// which disabled hub PINGs *and* link teardown on a missing
+			// PONG — so a hub never learned that a client had gone and
+			// listed dead peers as present in a room forever. Every
+			// feature that turns on "is this person here?" was wrong out
+			// of the box, mention notification worst of all: the people
+			// most in need of an offline notification (dropped link,
+			// killed app, dead battery) were exactly the ones the hub
+			// still believed were in the room. Set either to 0 to
+			// restore the old behaviour deliberately.
+			PingInterval:                   Duration{30 * time.Second},
+			PingTimeout:                    Duration{60 * time.Second},
 			EnableResourceTransfer:         true,
 			MaxResourceBytes:               262144,
 			MaxPendingResourceExpectations: 8,
@@ -332,3 +354,8 @@ func applyLimitDefaults(l *LimitsConfig) {
 		l.RateLimitMsgsPerMin = 240
 	}
 }
+
+// DefaultsForTest exposes the shipped defaults so tests can assert on
+// them. The defaults are part of the product — several features only
+// work if they are right — and nothing else can check that.
+func DefaultsForTest() HubConfig { return defaults().Hub }
