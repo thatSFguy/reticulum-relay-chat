@@ -106,6 +106,16 @@ invites; registered rooms and klines surviving restarts.
 Every relayed message's `K_SRC` is rewritten to the link-verified
 identity, so a client cannot spoof another's messages.
 
+### Replies and reactions
+
+RRC has no reply or reaction message, so a client that supports them
+elsewhere cannot use them in a room. **[docs/rrc-extensions.md](docs/rrc-extensions.md)**
+proposes a way to carry both that costs an unmodified client nothing: a
+reserved envelope-key range the hub relays verbatim and never
+interprets, so replies and reactions stay a client convention and the
+hub stays transport-agnostic. Offered to other RRC implementations as a
+convention rather than a change to RRC itself.
+
 ---
 
 ## Deploy it
