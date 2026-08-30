@@ -153,10 +153,12 @@ to verify the signature against and drop every notification in silence.
 The cost is that messaging clients list that destination beside real
 contacts.
 
-So it announces under its own name: `<hub> — RRC notifications` by
-default, or whatever `lxmf_display_name` says. The hub used to appear
-twice under one name, once as a room to join and once as somebody to
-message; only the first was ever true.
+So it announces as `<hub name>(noreply)` — derived, with no setting for
+it. Whether that address reads replies is a fact about the software,
+not a preference, and a free-form name could be made indistinguishable
+from a person. The hub used to appear twice under one name, once as a
+room to join and once as somebody to message; only the first was ever
+true. Long names are truncated to fit; the `(noreply)` never is.
 
 And it answers. Message that address and the hub replies once, saying
 the address only sends, and giving the link to join the hub properly.

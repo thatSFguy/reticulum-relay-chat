@@ -3,47 +3,79 @@ package config
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
-// --- the LXMF display name --------------------------------------------
+// --- the LXMF notification name ---------------------------------------
 
-// The hub announces on two aspects. rrc.hub is a room to join;
-// lxmf.delivery is a sender that never reads a reply. A messaging
-// client lists the second beside real people, so under the hub's own
-// name it is indistinguishable from a correspondent — and the hub shows
-// up twice in an announce list, only one of which is true.
-func TestLXMFNameIsDistinctFromTheHubName(t *testing.T) {
-	c := HubConfig{Name: "thatSFguy"}
-	if got := c.LXMFName(); got == c.Name {
-		t.Errorf("LXMFName() = %q, same as the hub name — the two announces are indistinguishable", got)
-	}
-	if got := c.LXMFName(); !strings.Contains(got, "thatSFguy") {
-		t.Errorf("LXMFName() = %q, want it to still identify the hub", got)
-	}
-	if got := c.LXMFName(); !strings.Contains(got, "notification") {
-		t.Errorf("LXMFName() = %q, want it to say what the address is for", got)
-	}
-}
-
-func TestLXMFNameIsConfigurable(t *testing.T) {
-	c := HubConfig{Name: "thatSFguy", LXMFDisplayName: "hub alerts"}
-	if got := c.LXMFName(); got != "hub alerts" {
-		t.Errorf("LXMFName() = %q, want the configured value", got)
-	}
-	// Whitespace-only is not a choice.
-	c.LXMFDisplayName = "   "
-	if got := c.LXMFName(); got != "thatSFguy"+LXMFNotifySuffix {
-		t.Errorf("LXMFName() = %q, want the derived default", got)
-	}
-}
-
-// An unnamed hub must still announce something meaningful rather than a
-// bare suffix.
-func TestLXMFNameHandlesAnUnnamedHub(t *testing.T) {
-	c := HubConfig{}
+// A messaging client lists the hub's lxmf.delivery destination beside
+// real people. Under the hub's own name it is indistinguishable from a
+// correspondent — and the hub appears twice in an announce list, only
+// one of which is true.
+func TestLXMFNameMarksTheAddressAsOneWay(t *testing.T) {
+	c := HubConfig{Name: "MichMesh RRC Hub"}
 	got := c.LXMFName()
-	if got == "" || strings.HasPrefix(got, LXMFNotifySuffix) {
-		t.Errorf("LXMFName() = %q for an unnamed hub", got)
+	if got != "MichMesh RRC Hub"+LXMFNoReplySuffix {
+		t.Errorf("LXMFName() = %q, want the hub name plus %q", got, LXMFNoReplySuffix)
+	}
+	if got == c.Name {
+		t.Error("the notification address announces under the hub's own name")
+	}
+}
+
+// The suffix is the part that carries the meaning. A name truncated to
+// "MichMesh RRC Hu" is odd; one that silently loses "(noreply)" is a
+// hub posing as somebody you can talk to.
+func TestTheSuffixIsNeverWhatGetsDropped(t *testing.T) {
+	for _, name := range []string{
+		strings.Repeat("A", 200),
+		strings.Repeat("word ", 40),
+		strings.Repeat("é", 100), // 2 bytes each
+		strings.Repeat("🎉", 60),  // 4 bytes each
+	} {
+		got := HubConfig{Name: name}.LXMFName()
+		if !strings.HasSuffix(got, LXMFNoReplySuffix) {
+			t.Errorf("name of %d bytes lost the suffix: %q", len(name), got)
+		}
+		if len(got) > lxmfNameMaxBytes {
+			t.Errorf("name of %d bytes produced %d bytes, over the %d budget: %q",
+				len(name), len(got), lxmfNameMaxBytes, got)
+		}
+		// Upstream does dn.decode("utf-8") on this (SPEC §9.3): invalid
+		// UTF-8 makes the name vanish entirely rather than look odd.
+		if !utf8.ValidString(got) {
+			t.Errorf("truncation produced invalid UTF-8 for a %d-byte name: %q", len(name), got)
+		}
+	}
+}
+
+// Truncating mid-word can leave a trailing space, which reads as a
+// mistake rather than a truncation.
+func TestTruncationDoesNotLeaveDanglingWhitespace(t *testing.T) {
+	got := HubConfig{Name: strings.Repeat("ab ", 40)}.LXMFName()
+	if strings.Contains(got, " "+LXMFNoReplySuffix) {
+		t.Errorf("truncated name has a dangling space before the suffix: %q", got)
+	}
+}
+
+// A short name is left exactly alone.
+func TestAShortNameIsNotTruncated(t *testing.T) {
+	c := HubConfig{Name: "thatSFguy"}
+	if got := c.LXMFName(); got != "thatSFguy"+LXMFNoReplySuffix {
+		t.Errorf("LXMFName() = %q", got)
+	}
+}
+
+// An unnamed hub must still announce something, not a bare suffix.
+func TestLXMFNameHandlesAnUnnamedHub(t *testing.T) {
+	for _, name := range []string{"", "   ", "\t"} {
+		got := HubConfig{Name: name}.LXMFName()
+		if got == LXMFNoReplySuffix || strings.HasPrefix(got, LXMFNoReplySuffix) {
+			t.Errorf("unnamed hub announces as %q", got)
+		}
+		if !strings.HasSuffix(got, LXMFNoReplySuffix) {
+			t.Errorf("unnamed hub lost the suffix: %q", got)
+		}
 	}
 }
 

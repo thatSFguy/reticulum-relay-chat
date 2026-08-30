@@ -228,18 +228,17 @@ history_pull_bytes = 16384               # (default 16384)
 # only.
 unique_nicks = true
 
-# The name the hub's lxmf.delivery destination announces under. Empty
-# derives "<name> — RRC notifications". (default "")
+# The hub's lxmf.delivery destination — the address notifications are
+# sent FROM — announces as "<name>(noreply)", derived from name above.
+# There is no setting for it.
 #
-# It is deliberately NOT the hub name. The hub announces two
-# destinations: rrc.hub, a room to join, and lxmf.delivery, the address
-# it sends mention notifications FROM. A messaging client lists the
-# second beside real people, so under the same name the hub appears
-# twice and one of those entries is a lie — nobody reads replies there.
-# The hub answers anyone who messages it with a line saying so.
-#
-# Only announced at all when mention_notify and mention_lxmf are both on.
-#lxmf_display_name = ""
+# Deriving it rather than letting an operator choose is deliberate.
+# Whether that address reads replies is a fact about the software, not a
+# preference: a free-form name could be made indistinguishable from a
+# person, which is the confusion this exists to prevent, and every hub
+# spelling the same property differently would leave users nothing to
+# recognise. The name is truncated to fit if necessary — the "(noreply)"
+# is never what gets dropped. The rrc.hub announce keeps the full name.
 
 # Notice when somebody is named, and hold it for them. (default true)
 #
@@ -299,9 +298,8 @@ mention_snippet_bytes = 140    # how much of the message a notification quotes (
 # client on the mesh will list it as a contact. That is not optional —
 # a recipient who has never heard that announce holds no public key to
 # verify the notification's signature against, and drops it in silence.
-# It announces as lxmf_display_name (above) rather than the hub's own
-# name, and answers anyone who messages it, so it does not pose as a
-# person. Set false if you would rather the hub announced only rrc.hub.
+# It announces as "<name>(noreply)" rather than the hub's own name, and
+# answers anyone who messages it, so it does not pose as a person. Set false if you would rather the hub announced only rrc.hub.
 mention_lxmf = true
 
 # Pin a propagation node by its lxmf.propagation destination hash (32
