@@ -51,6 +51,15 @@ func (f *fakeLink) SendResource(payload []byte) error {
 	return nil
 }
 
+// resourcePayloads returns the payloads sent as RNS Resources.
+func (f *fakeLink) resourcePayloads() [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]byte, len(f.resources))
+	copy(out, f.resources)
+	return out
+}
+
 func (f *fakeLink) frames() [][]byte {
 	f.mu.Lock()
 	defer f.mu.Unlock()

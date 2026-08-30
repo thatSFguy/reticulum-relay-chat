@@ -199,7 +199,7 @@ func (h *Hub) noteMentions(room string, env *rrc.Envelope) {
 		// A session object is not a person. Everything below turns on
 		// whether the hub has recent evidence the peer is still on the
 		// other end of it — see mentionLivenessProven.
-		if t.session != nil && h.mentionLivenessProven(t.session) {
+		if t.session != nil && !t.session.isAway() && h.mentionLivenessProven(t.session) {
 			// In the room: fan-out delivered the message itself, and a
 			// second "you were mentioned" for a line they are looking
 			// at is noise.
@@ -209,7 +209,7 @@ func (h *Hub) noteMentions(room string, env *rrc.Envelope) {
 			// Connected, but somewhere else: tell them now.
 			live = append(live, pending{
 				sess: t.session,
-				text: fmt.Sprintf("you were mentioned in %s by %s: %s",
+				text: fmt.Sprintf("you were mentioned in #%s by %s: %s",
 					room, mentionAuthor(byNick, senderHex), snippet(body, h.mentionSnippetBytes())),
 			})
 			continue
@@ -342,7 +342,7 @@ func (s *Session) flushMentions() {
 	s.sendNotice(nil, fmt.Sprintf("--- %d mention(s) while you were away ---", len(held)))
 	for _, m := range held {
 		room := m.Room
-		s.sendNotice(&room, fmt.Sprintf("%s in %s by %s: %s",
+		s.sendNotice(&room, fmt.Sprintf("%s in #%s by %s: %s",
 			humanAgo(time.Since(time.Unix(int64(m.TS), 0))),
 			m.Room, mentionAuthor(m.ByNick, m.ByHex), m.Text))
 	}

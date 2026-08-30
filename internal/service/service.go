@@ -116,6 +116,10 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 		identities: make(map[string]peerBinding),
 	}
 	svc.hub = hub.New(id.Hash(), cfg.Hub, logger)
+	// The hub signs as its identity but clients dial its destination,
+	// and only the destination is any use to somebody trying to get
+	// back after an offline mention notification.
+	svc.hub.SetDestHash(svc.destHash)
 
 	if err := svc.transport.RegisterLocal(&rns.LocalDestination{
 		DestHash:      svc.destHash,
@@ -151,6 +155,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 	// §6.7.6 identification is consumed by the Transport (see the note
 	// above bindPeer); this is how the hub hears about it.
 	svc.transport.LinkManager().SetRemoteIdentifiedHandler(svc.bindPeer)
+	svc.transport.LinkManager().SetLinkClosedHandler(svc.onLinkClosed)
 
 	logger.Printf("RRC hub %q — dest_name=%s dest_hash=%s identity=%s",
 		cfg.Hub.Name, hubAspect, hex.EncodeToString(svc.destHash), id.HexHash())
@@ -349,6 +354,45 @@ func (s *Service) bindPeer(linkID, pubKey []byte) {
 	} else {
 		s.log.Printf("link %x bound to %s", linkID[:4], hex.EncodeToString(idHash))
 	}
+}
+
+// onLinkClosed reaps the session behind a link the moment it closes,
+// rather than up to 30 seconds later when the janitor next looks.
+//
+// That delay was not cosmetic. Room membership is what the hub answers
+// "is this person here?" with, and for the whole window the answer was
+// wrong in the one direction that loses messages: a mention aimed at
+// somebody who had just disconnected was treated as delivered by the
+// room fan-out, so it was neither shown to them nor queued for their
+// return. Observed live at 56 seconds before reticulum-go v0.7.0 gave
+// us anything to hook.
+//
+// The janitor stays. This fires only for a link whose closure was
+// OBSERVED — a §6.7.3 LINKCLOSE, or the library's own watchdog — and a
+// client that vanishes without either (dead battery, lost signal) is
+// still found by polling. Presence remains an estimate; this narrows
+// the window rather than closing it, which is why
+// hub.mentionLivenessProven is still load-bearing.
+func (s *Service) onLinkClosed(linkID []byte, reason byte) {
+	// A local close is our own doing, and the session teardown that
+	// decided on it is already unwinding — rnsLink.Close calls
+	// CloseLink, which is what got us here. Re-entering would be a
+	// second pass over state the first has not finished with.
+	if reason == rns.TeardownLocalClosed {
+		return
+	}
+	key := hex.EncodeToString(linkID)
+	s.mu.Lock()
+	sess := s.sessions[key]
+	s.mu.Unlock()
+	if sess == nil {
+		return
+	}
+	s.log.Printf("link %x closed (reason 0x%02x) — closing session now", linkID[:4], reason)
+	// Outside the lock: Close re-enters the service through
+	// rnsLink.Close -> dropSession, and the hub's own teardown calls
+	// back in for the peer identity.
+	sess.Close()
 }
 
 func (s *Service) peerIdentity(linkID []byte) []byte {

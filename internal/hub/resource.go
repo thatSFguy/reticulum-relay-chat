@@ -63,7 +63,7 @@ func (s *Session) handleResourceEnvelope(env *rrc.Envelope) {
 		kind:      info.Kind,
 		size:      info.Size,
 		sha256:    info.SHA256,
-		room:      rrc.RoomName(env),
+		room:      roomFromEnvelope(env),
 		srcSender: s.identity(),
 		expiresMs: h.now() + ttl.Milliseconds(),
 	}

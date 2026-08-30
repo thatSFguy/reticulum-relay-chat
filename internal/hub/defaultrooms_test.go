@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/roomreg"
@@ -173,5 +174,97 @@ func TestTheDefaultLobbyIsPersisted(t *testing.T) {
 	}
 	if _, ok := recs["lobby"]; !ok {
 		t.Errorf("#lobby was not written to rooms.toml (got %v)", recs)
+	}
+}
+
+// --- pruning -----------------------------------------------------------
+
+// ensureDefaultRooms runs only at startup, so pruning a default room
+// deletes something the operator declared should always exist and
+// leaves it gone until the next restart. /list then advertises nothing
+// to the next visitor — the empty-prompt problem default_rooms exists
+// to solve.
+func TestADefaultRoomIsNotPruned(t *testing.T) {
+	h := roomsHub(t, func(c *config.HubConfig) {
+		c.DefaultRooms = []string{"lobby"}
+		c.RoomRegistryPruneAfter = config.Duration{Duration: time.Hour}
+		c.RoomRegistryPruneInterval = config.Duration{Duration: time.Minute}
+	})
+	ageEveryRoom(h)
+
+	h.doPrune()
+
+	if roomOf(h, "lobby") == nil {
+		t.Error("the default room was pruned; it is gone until the hub restarts")
+	}
+}
+
+// The exemption must not become "registered rooms are never pruned".
+func TestANonDefaultRoomIsStillPruned(t *testing.T) {
+	h := roomsHub(t, func(c *config.HubConfig) {
+		c.DefaultRooms = []string{"lobby"}
+		c.RoomRegistryPruneAfter = config.Duration{Duration: time.Hour}
+		c.RoomRegistryPruneInterval = config.Duration{Duration: time.Minute}
+	})
+	h.mu.Lock()
+	r := newRoom("ephemeral")
+	r.registered = true
+	h.rooms["ephemeral"] = r
+	h.mu.Unlock()
+	ageEveryRoom(h)
+
+	h.doPrune()
+
+	if roomOf(h, "ephemeral") != nil {
+		t.Error("a stale registered room that is not a default was kept")
+	}
+	if roomOf(h, "lobby") == nil {
+		t.Error("the default room was pruned")
+	}
+}
+
+// The exemption reads the live config, so what an operator writes is
+// matched the same way a JOIN would be.
+func TestTheExemptionNormalizesTheConfiguredName(t *testing.T) {
+	h := roomsHub(t, func(c *config.HubConfig) {
+		c.DefaultRooms = []string{"#Lobby"}
+		c.RoomRegistryPruneAfter = config.Duration{Duration: time.Hour}
+		c.RoomRegistryPruneInterval = config.Duration{Duration: time.Minute}
+	})
+	ageEveryRoom(h)
+
+	h.doPrune()
+
+	if roomOf(h, "lobby") == nil {
+		t.Error(`default_rooms = ["#Lobby"] did not exempt the room it created`)
+	}
+}
+
+// Reading the live config rather than flagging the Room at creation is
+// what makes this true: an operator who drops a room from default_rooms
+// is saying the hub need not keep it, and it becomes prunable again
+// without a restart.
+func TestARoomDroppedFromDefaultsBecomesPrunableAgain(t *testing.T) {
+	h := roomsHub(t, func(c *config.HubConfig) {
+		c.DefaultRooms = []string{"lobby"}
+		c.RoomRegistryPruneAfter = config.Duration{Duration: time.Hour}
+		c.RoomRegistryPruneInterval = config.Duration{Duration: time.Minute}
+	})
+	ageEveryRoom(h)
+
+	h.cfg.DefaultRooms = nil // as a config reload would leave it
+	h.doPrune()
+
+	if roomOf(h, "lobby") != nil {
+		t.Error("a room no longer listed in default_rooms was still exempt")
+	}
+}
+
+// ageEveryRoom makes every room look long-idle and empty.
+func ageEveryRoom(h *Hub) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.rooms {
+		r.lastUsedTS = h.nowUnix() - 48*3600
 	}
 }

@@ -11,7 +11,7 @@
 
 [hub]
 # Display name shown to clients in the WELCOME message. (default "RRC Hub")
-name = "RRC Hub"
+name = "thatSFguy"
 
 # Software version string advertised in WELCOME. Leave it commented out
 # and the hub advertises its own build version, which is what you almost
@@ -92,6 +92,13 @@ room_registry_path = "rooms.toml"
 # A room that already exists in rooms.toml is left exactly as it is;
 # this only ensures the room EXISTS, and never resets a topic, mode,
 # operator or ban somebody set deliberately.
+#
+# Rooms listed here are exempt from room_registry_prune_after. They are
+# only created at startup, so pruning one would leave it gone until the
+# next restart — and /list would then advertise nothing to the next
+# visitor, which is the empty-prompt problem this setting exists to
+# solve. Drop a name from this list and its room becomes prunable again
+# on the next tick, no restart needed.
 default_rooms = ["lobby"]
 
 # Path to the persisted kline list. Empty disables kline persistence.
@@ -206,6 +213,21 @@ history_pull_bytes = 16384               # (default 16384)
 # guessing; the hash-prefix form is the way to be certain.
 #
 # Anyone can turn this off for themselves with /notify off.
+# Make the hub GRANT a nickname rather than accept one: the first
+# identity to claim a name keeps it, and a later claimant becomes sam1,
+# sam2, and so on. A name is owned by an identity, so it survives
+# disconnection and comes back to its owner. (default true)
+#
+# On by default because the alternative is not "names are flexible" but
+# "@mentions silently reach nobody": resolution declines rather than
+# guess between two people answering to the same name, and says nothing
+# about having declined.
+#
+# The peer directory is what makes ownership outlive a disconnection, so
+# with mention_notify = false uniqueness holds among connected sessions
+# only.
+unique_nicks = true
+
 mention_notify = false
 
 # Where the peer directory lives: the identities this hub has met, their
@@ -281,6 +303,12 @@ rate_limit_msgs_per_minute = 240     # token-bucket capacity (default 240)
 # One or more Reticulum transport attachments. Only tcp_client is
 # supported — attach to any rnsd TCPServerInterface. Use a public
 # transport node so clients on the wider mesh can reach the hub.
+#
+# There is no default, and this placeholder is not a working address:
+# which mesh a hub joins is the operator's decision, and shipping a
+# example pointed at somebody else's node would quietly make it
+# everyone's. Put your own transport node here, or one you have been
+# invited to use.
 [[interfaces]]
 type = "tcp_client"
-address = "RNS.MichMesh.net:7822"
+address = "your-transport-node.example.net:4965"
