@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,5 +63,57 @@ func TestANegativeReplayCountDisablesTheJoinReplay(t *testing.T) {
 
 	if h.HistoryReplayCount != 0 {
 		t.Errorf("HistoryReplayCount = %d, want 0 (replay off)", h.HistoryReplayCount)
+	}
+}
+
+// The example config explains each feature in prose and then sets it.
+// When a default flips, the setting is easy to remember and the prose
+// above it is easy to forget — and a comment saying "Off by default"
+// over a setting that is on does not merely age, it misleads somebody
+// reading the file to decide whether to turn something on.
+//
+// This caught exactly that: mention_notify was flipped on while the
+// section header above it still said "Off by default".
+func TestTheExampleAgreesWithTheDefaultsItDocuments(t *testing.T) {
+	path := filepath.Join("..", "..", "configs", "rrc-hub.example.toml")
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	d := defaults().Hub
+
+	// Flags whose comments in that file make a claim about the default.
+	for _, f := range []struct {
+		key            string
+		example, deflt bool
+	}{
+		{"mention_notify", c.Hub.MentionNotify, d.MentionNotify},
+		{"mention_lxmf", c.Hub.MentionLXMF, d.MentionLXMF},
+		{"unique_nicks", c.Hub.UniqueNicks, d.UniqueNicks},
+		{"history_enabled", c.Hub.HistoryEnabled, d.HistoryEnabled},
+	} {
+		if f.example != f.deflt {
+			t.Errorf("example sets %s = %v but the default is %v — one of the two is "+
+				"lying to whoever reads the file", f.key, f.example, f.deflt)
+		}
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+
+	// A prose claim about being off, in a file where it is on.
+	for _, claim := range []string{"Off by default", "off by default"} {
+		if !strings.Contains(text, claim) {
+			continue
+		}
+		// history_enabled is genuinely off and may say so; nothing else
+		// in this file is entitled to that sentence.
+		if strings.Count(text, claim) > 1 {
+			t.Errorf("%q appears %d times; only history_enabled is off by default, so "+
+				"one of those is stale", claim, strings.Count(text, claim))
+		}
 	}
 }

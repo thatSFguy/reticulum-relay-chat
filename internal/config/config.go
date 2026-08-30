@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -121,26 +122,43 @@ type HubConfig struct {
 	// same name, and says nothing about having declined.
 	UniqueNicks bool `toml:"unique_nicks"`
 
+	// MentionNotify turns on mention detection and the peer directory
+	// that makes it work.
+	//
+	// On by default. It was off, on the reasoning that a hub should not
+	// start keeping a record of who has visited without being asked —
+	// but the effect of that default was that the hub's most useful
+	// feature was invisible until an operator read the config closely
+	// enough to find it, and "@nick" silently did nothing on every hub
+	// nobody had tuned.
+	//
+	// Be aware of what it turns on: the hub begins retaining a
+	// directory of identities it has met — public key, last nickname,
+	// last seen — at PeerRegistryPath. That is what makes somebody
+	// addressable after their link is gone, and there is no way to
+	// notify an absent peer without it. Set false to keep no such
+	// record.
 	MentionNotify       bool   `toml:"mention_notify"`
 	PeerRegistryPath    string `toml:"peer_registry_path"`
 	MaxKnownPeers       int    `toml:"max_known_peers"`
 	MaxPendingMentions  int    `toml:"max_pending_mentions"`
 	MentionSnippetBytes int    `toml:"mention_snippet_bytes"`
-	// MentionLXMF hands a waiting mention to an LXMF propagation node,
-	// where the recipient's own client collects it — the only way to
-	// reach someone whose RRC link is gone. Without it a mention still
-	// waits, but nothing tells them to come and look.
-	MentionLXMF bool `toml:"mention_lxmf"`
-	// LXMFDisplayName is the name the hub's lxmf.delivery destination
-	// announces under. Empty derives one from Name.
+	// MentionLXMF delivers a waiting mention over LXMF — directly when
+	// the recipient answers, and otherwise into store-and-forward for
+	// their client to collect. It is the only way to reach somebody
+	// whose RRC link is gone. Without it a mention still waits, but
+	// nothing tells them to come and look, which is the difference
+	// between a feature and a footnote.
 	//
-	// It is separate from Name because the two destinations mean
-	// different things to whoever is browsing announces. The rrc.hub
-	// entry is a place to join; the lxmf.delivery entry is a sender
-	// that will never read a reply — but a messaging client lists it
-	// beside real people, and under the same name it is indistinguishable
-	// from one. See LXMFName.
-	LXMFDisplayName string `toml:"lxmf_display_name"`
+	// On by default, with a consequence worth knowing: the hub then
+	// ANNOUNCES an lxmf.delivery destination. It has to — a recipient
+	// who has never heard that announce holds no public key to verify
+	// the signature against and drops every notification in silence
+	// (see the incident registry). Every messaging client on the mesh
+	// will therefore list the hub as a contact. It announces under
+	// LXMFName() rather than the hub's own name, and answers anyone
+	// who messages it, so it does not masquerade as a person.
+	MentionLXMF bool `toml:"mention_lxmf"`
 	// LXMFPropagationNode pins the store-and-forward node the fallback
 	// route uses. Empty auto-selects; see internal/service/propnodes.go.
 	LXMFPropagationNode string `toml:"lxmf_propagation_node"`
@@ -265,13 +283,13 @@ func defaults() Config {
 			HistoryPullCount:               100,
 			HistoryPullBytes:               16384,
 			UniqueNicks:                    true,
-			MentionNotify:                  false,
+			MentionNotify:                  true,
 			PeerRegistryPath:               "peers.toml",
 			MaxKnownPeers:                  2048,
 			MaxPendingMentions:             20,
 			MentionSnippetBytes:            140,
 			DefaultRooms:                   []string{"lobby"},
-			MentionLXMF:                    false,
+			MentionLXMF:                    true,
 			LXMFPropagationFanout:          2,
 			Limits: LimitsConfig{
 				MaxNickBytes:        32,
@@ -403,25 +421,54 @@ func applyLimitDefaults(l *LimitsConfig) {
 // work if they are right — and nothing else can check that.
 func DefaultsForTest() HubConfig { return defaults().Hub }
 
-// LXMFNotifySuffix is appended to Name when no lxmf_display_name is
-// configured.
-const LXMFNotifySuffix = " — RRC notifications"
-
-// LXMFName is the display name for the hub's lxmf.delivery announce.
+// LXMFNoReplySuffix marks the hub's lxmf.delivery destination as one
+// that sends but never reads.
 //
-// Defaults to the hub name plus a suffix saying what the destination
-// is, because the alternative is what shipped before: the hub appearing
-// twice in an announce list under one name, once as a room to join and
-// once as somebody to message. Only the first of those is true.
+// Derived, not configurable. The name is not decoration: a messaging
+// client lists this destination beside real people, and whether it is
+// a correspondent or a one-way notifier is a fact about the software,
+// not a preference. An operator who could set it freely could set it to
+// something indistinguishable from a person — which is the exact
+// confusion this exists to prevent — and every hub spelling the same
+// property differently would leave users with nothing to recognise.
+const LXMFNoReplySuffix = "(noreply)"
+
+// lxmfNameMaxBytes bounds the whole derived name.
+//
+// The msgpack bin8 header the display name is written with (SPEC §4.3)
+// tops out at 255, but an announce is broadcast repeatedly to the whole
+// mesh and may cross a LoRa link, so the ceiling is not the budget. 64
+// leaves 55 for the hub's own name, comfortably more than the 32 bytes
+// RRC allows a nickname.
+const lxmfNameMaxBytes = 64
+
+// LXMFName is the display name for the hub's lxmf.delivery announce:
+// the hub's name with LXMFNoReplySuffix appended, truncated to fit.
+//
+// The suffix is never what gets dropped. It is the part that carries
+// the meaning — a name truncated to "MichMesh RRC Hu" is merely odd,
+// while one that silently loses "(noreply)" is a hub posing as somebody
+// you can talk to. So the base is trimmed to make room, on a rune
+// boundary, and any whitespace the trim exposes goes too.
+//
+// The hub's rrc.hub announce is unaffected and keeps the full name.
 func (h HubConfig) LXMFName() string {
-	if n := strings.TrimSpace(h.LXMFDisplayName); n != "" {
-		return n
+	base := strings.TrimSpace(h.Name)
+	if base == "" {
+		base = "RRC hub"
 	}
-	name := strings.TrimSpace(h.Name)
-	if name == "" {
-		return "RRC notifications"
+	room := lxmfNameMaxBytes - len(LXMFNoReplySuffix)
+	if len(base) > room {
+		base = base[:room]
+		// Rune boundary: a name cut mid-character is invalid UTF-8, and
+		// upstream's display_name_from_app_data does dn.decode("utf-8")
+		// (SPEC §9.3) — which fails, and the name vanishes entirely.
+		for len(base) > 0 && !utf8.ValidString(base) {
+			base = base[:len(base)-1]
+		}
+		base = strings.TrimRight(base, " \t")
 	}
-	return name + LXMFNotifySuffix
+	return base + LXMFNoReplySuffix
 }
 
 // VersionPrefix and DefaultVersion are the software version advertised
