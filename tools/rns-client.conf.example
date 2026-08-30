@@ -1,0 +1,22 @@
+# An RNS config for the test clients. Copy to a directory of your own
+# and pass that directory as RNS_CONFIG.
+#
+# share_instance = No matters: these tools must not attach to whatever
+# RNS instance is already running on the machine, or they will not be
+# talking to the hub you think they are.
+[reticulum]
+  enable_transport = No
+  share_instance = No
+  instance_name = rrctools
+
+[logging]
+  loglevel = 3
+
+[interfaces]
+  # Point this at the same mesh the hub is on. For a loopback rig, an
+  # rnsd with a TCPServerInterface on 127.0.0.1:4242.
+  [[To the hub's mesh]]
+    type = TCPClientInterface
+    interface_enabled = True
+    target_host = 127.0.0.1
+    target_port = 4242

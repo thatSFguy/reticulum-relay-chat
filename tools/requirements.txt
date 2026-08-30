@@ -1,0 +1,8 @@
+# Pinned to what the tools in this directory were last exercised
+# against, on a live public mesh. These are the upstream reference
+# implementations — a message this stack accepts is one a real client
+# accepts, which is the whole reason to test against it rather than
+# against our own encoder.
+rns==1.5.2
+lxmf==1.1.1
+cbor2==6.1.4
