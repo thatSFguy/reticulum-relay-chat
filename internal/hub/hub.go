@@ -47,6 +47,15 @@ type Link interface {
 // resourceExpectFloor is the resource-expectation reaper interval.
 const resourceExpectFloor = 30 * time.Second
 
+// maxExtBytes caps the total encoded size of an envelope's extension
+// keys (docs/rrc-extensions.md §5, which recommends 128 — roughly ten
+// times what replies and reactions need).
+//
+// The cap is the whole reason a reserved key range is safe to relay
+// unread: without it, "the hub forwards keys it does not understand"
+// is an amplification vector with the hub's return address on it.
+const maxExtBytes = 128
+
 // unwelcomedIdleTimeout bounds how long a session may stay un-welcomed
 // (an RRC frame arrived but no successful HELLO) before the hub closes
 // it, so a peer cannot hold session slots without authenticating

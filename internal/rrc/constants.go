@@ -24,6 +24,21 @@ const (
 	KNick = 7 // nickname (string, optional)
 )
 
+// ExtKeyMin is the first envelope key in the extension range
+// (docs/rrc-extensions.md §1). Keys 0..7 are RRC core; 8..63 are
+// reserved for a future core and are dropped by a conforming hub;
+// 64 and above belong to extensions and are relayed verbatim.
+const ExtKeyMin = 64
+
+// Extension keys defined by docs/rrc-extensions.md §2. The hub does not
+// interpret these — they are named here so the documentation and the
+// cap that protects them have something to point at.
+const (
+	KReplyTo = 64 // K_ID this message replies to (8 bytes)
+	KReactTo = 65 // K_ID this message reacts to (8 bytes); K_BODY is the reaction
+	KReactOp = 66 // 0 = apply (default), 1 = retract
+)
+
 // Message types.
 const (
 	THello            = 1

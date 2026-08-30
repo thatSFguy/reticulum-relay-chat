@@ -58,6 +58,10 @@ func (h *Hub) recordMessage(room string, env *rrc.Envelope) {
 		Nick:        nick,
 		Type:        env.Type,
 		Body:        body,
+		// Retained so a replayed reply still threads. Already bounded
+		// by maxExtBytes on the relay path, so this cannot grow a
+		// record beyond what the store already caps.
+		Ext: env.Ext,
 	}
 	if err := h.history.Append(room, rec); err != nil {
 		h.log.Printf("history: append to #%s failed: %v", room, err)
@@ -167,6 +171,7 @@ func recordEnvelope(room string, rec history.Record) *rrc.Envelope {
 		Src:         rec.Src,
 		Room:        &room,
 		Body:        rec.Body,
+		Ext:         rec.Ext,
 	}
 	if rec.Nick != "" {
 		nick := rec.Nick

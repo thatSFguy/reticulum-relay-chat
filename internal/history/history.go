@@ -87,6 +87,16 @@ type Record struct {
 	// StoredAtMs is the hub's own clock when the record was appended.
 	// Expiry and ordering use this, never TimestampMs.
 	StoredAtMs int64 `cbor:"7,keyasint"`
+
+	// Ext carries the envelope's extension keys (>= rrc.ExtKeyMin), so
+	// a replayed message still threads. Without it a room opens with
+	// every reply in its replay demoted to an ordinary line — the
+	// feature would work live and quietly break on rejoin, which is
+	// the harder failure to notice.
+	//
+	// A new CBOR key on an omitempty field: records written before this
+	// simply lack it, and decode to nil.
+	Ext map[uint64]any `cbor:"8,keyasint,omitempty"`
 }
 
 // Options configures a Store. Zero fields take the package defaults.
