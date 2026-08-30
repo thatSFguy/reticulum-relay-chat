@@ -82,6 +82,14 @@ type Service struct {
 	// nothing to announce.
 	lxmfDest []byte
 
+	// notifier is the installed LXMF notifier, kept so the inbound
+	// auto-reply can send over the same destination.
+	notifier *lxmfNotifier
+
+	// lastInboundReply throttles the auto-reply to somebody who
+	// messaged the notification address, per sender.
+	lastInboundReply map[string]time.Time
+
 	mu         sync.Mutex
 	sessions   map[string]*hub.Session // linkID hex -> session
 	identities map[string]peerBinding  // linkID hex -> what LINKIDENTIFY proved
@@ -146,6 +154,7 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 			logger.Printf("lxmf: mention notifications disabled — %v", err)
 		} else {
 			svc.hub.SetOfflineNotifier(notifier)
+			svc.notifier = notifier
 			svc.lxmfDest = id.DestinationHashFor(lxmf.FullName())
 		}
 	}

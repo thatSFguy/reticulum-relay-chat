@@ -95,6 +95,7 @@ func newLXMFNotifier(s *Service) (*lxmfNotifier, error) {
 	delivery.DeliveryProofTimeout = notifyProofTimeout
 	delivery.LinkSendTimeout = notifyLinkSendTimeout
 	delivery.OnError = func(err error) { s.log.Printf("lxmf: %v", err) }
+	delivery.OnMessage = s.answerInboundLXMF
 
 	var pinned []byte
 	if hexHash := strings.TrimSpace(s.cfg.Hub.LXMFPropagationNode); hexHash != "" {
@@ -137,8 +138,14 @@ func newLXMFNotifier(s *Service) (*lxmfNotifier, error) {
 // because this destination is an outbox, not an inbox — it has no
 // inbound traffic to price, and asking senders to grind proof-of-work
 // at a hub that will not read their replies would be dishonest.
+//
+// The name is cfg.LXMFName(), NOT cfg.Name. A messaging client lists an
+// lxmf.delivery announce beside real people, so under the hub's own
+// name this destination is indistinguishable from somebody you can talk
+// to — and the hub would appear twice in an announce list, once as a
+// room to join and once as a correspondent. Only the first is true.
 func (s *Service) buildDeliveryAnnounce(context byte) (*rns.Packet, error) {
-	appData, err := rns.EncodeLXMFAppData([]byte(s.cfg.Hub.Name), nil)
+	appData, err := rns.EncodeLXMFAppData([]byte(s.cfg.Hub.LXMFName()), nil)
 	if err != nil {
 		return nil, fmt.Errorf("lxmf announce app_data: %w", err)
 	}
@@ -151,7 +158,7 @@ func (s *Service) announceDelivery() {
 	if s.lxmfDest == nil {
 		return
 	}
-	appData, err := rns.EncodeLXMFAppData([]byte(s.cfg.Hub.Name), nil)
+	appData, err := rns.EncodeLXMFAppData([]byte(s.cfg.Hub.LXMFName()), nil)
 	if err != nil {
 		s.log.Printf("lxmf announce build failed: %v", err)
 		return
@@ -441,4 +448,113 @@ func (n *lxmfNotifier) NotifyDirect(pubKey []byte, title, body string) error {
 		return fmt.Errorf("%w: %x has never announced", hub.ErrDeliveredUnconfirmed, known.DestHash[:4])
 	}
 	return nil
+}
+
+// inboundReplyInterval throttles the auto-reply per sender.
+//
+// The reply is itself an LXMF send, so an unthrottled one turns any
+// inbound message into a round trip somebody else could drive — and two
+// hubs pointed at each other into a loop. One answer per sender per
+// hour is enough to be helpful and too little to be a weapon.
+const inboundReplyInterval = time.Hour
+
+// answerInboundLXMF replies to somebody who messaged the hub's
+// notification address.
+//
+// That address is an outbox: the hub sends mention notifications from
+// it and reads nothing. But it announces on lxmf.delivery, which is what
+// makes it verifiable — and which also makes every messaging client
+// list it as a contact. Somebody will tap it and say hello. Before
+// this, that message went nowhere and they got silence, which looks
+// exactly like a hub that is broken.
+//
+// So the hub answers once, says what the address is, and points at the
+// thing they actually wanted: the room, in a form they can act on.
+func (s *Service) answerInboundLXMF(msg *lxmf.Message) {
+	if msg == nil || len(msg.SourceHash) == 0 {
+		return
+	}
+	// Logged on arrival, not only on a successful answer. Somebody
+	// messaging the notification address is a thing an operator wants
+	// to know happened, and without this line an inbound message that
+	// is throttled, or that arrives before the notifier is installed,
+	// is indistinguishable from one that never arrived at all.
+	s.log.Printf("lxmf: inbound message from %x to the notifications-only address (%q)",
+		msg.SourceHash[:4], snippetOf(msg.Title, msg.Content))
+
+	key := hex.EncodeToString(msg.SourceHash)
+
+	s.mu.Lock()
+	if s.lastInboundReply == nil {
+		s.lastInboundReply = make(map[string]time.Time)
+	}
+	now := time.Now()
+	last, seen := s.lastInboundReply[key]
+	if seen && now.Sub(last) < inboundReplyInterval {
+		s.mu.Unlock()
+		return
+	}
+	s.lastInboundReply[key] = now
+	// Bounded like every other per-peer map here: sweep what can no
+	// longer suppress anything.
+	for k, t := range s.lastInboundReply {
+		if now.Sub(t) >= inboundReplyInterval {
+			delete(s.lastInboundReply, k)
+		}
+	}
+	s.mu.Unlock()
+
+	n := s.notifier
+	if n == nil {
+		return
+	}
+	name := s.cfg.Hub.Name
+	if name == "" {
+		name = "this hub"
+	}
+	title := name + ": notifications only"
+	body := "This address only sends notifications — nobody reads replies here.\n\n" +
+		name + " is an RRC chat hub. To join it, add this hub in an RRC client:\n" +
+		s.hubLinkForInvite() + "\n\n" +
+		"You are getting this because you messaged the address the hub sends " +
+		"mention notifications from."
+
+	// sendDirect, not NotifyDirect: a reply already HAS the recipient's
+	// destination hash, straight off the message we just verified.
+	// NotifyDirect takes a 64-byte public key and derives the
+	// destination from it — that is the shape the mention path has,
+	// where all the hub retains of an absent peer is their key.
+	//
+	// Off the dispatcher goroutine either way: a send blocks for a proof.
+	go func() {
+		if err := n.sendDirect(msg.SourceHash, title, body); err != nil {
+			s.log.Printf("lxmf: could not answer inbound from %x: %v", msg.SourceHash[:4], err)
+			return
+		}
+		s.log.Printf("lxmf: answered inbound message from %x (notifications-only address)",
+			msg.SourceHash[:4])
+	}()
+}
+
+// snippetOf renders a short, bounded preview of an inbound message for
+// the log. Attacker-supplied text: truncated, and newlines flattened so
+// one message cannot forge extra log lines.
+func snippetOf(title, content []byte) string {
+	t := strings.TrimSpace(string(title) + " " + string(content))
+	t = strings.NewReplacer("\n", " ", "\r", " ").Replace(t)
+	const max = 48
+	if len(t) > max {
+		r := []rune(t)
+		if len(r) > max {
+			r = r[:max]
+		}
+		return string(r) + "…"
+	}
+	return t
+}
+
+// hubLinkForInvite renders the hub's own room link, or its bare
+// destination hash when the link format cannot be built.
+func (s *Service) hubLinkForInvite() string {
+	return "rrc@" + hex.EncodeToString(s.destHash)
 }

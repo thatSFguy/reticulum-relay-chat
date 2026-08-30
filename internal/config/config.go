@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -130,6 +131,16 @@ type HubConfig struct {
 	// reach someone whose RRC link is gone. Without it a mention still
 	// waits, but nothing tells them to come and look.
 	MentionLXMF bool `toml:"mention_lxmf"`
+	// LXMFDisplayName is the name the hub's lxmf.delivery destination
+	// announces under. Empty derives one from Name.
+	//
+	// It is separate from Name because the two destinations mean
+	// different things to whoever is browsing announces. The rrc.hub
+	// entry is a place to join; the lxmf.delivery entry is a sender
+	// that will never read a reply — but a messaging client lists it
+	// beside real people, and under the same name it is indistinguishable
+	// from one. See LXMFName.
+	LXMFDisplayName string `toml:"lxmf_display_name"`
 	// LXMFPropagationNode pins the store-and-forward node the fallback
 	// route uses. Empty auto-selects; see internal/service/propnodes.go.
 	LXMFPropagationNode string `toml:"lxmf_propagation_node"`
@@ -391,6 +402,27 @@ func applyLimitDefaults(l *LimitsConfig) {
 // them. The defaults are part of the product — several features only
 // work if they are right — and nothing else can check that.
 func DefaultsForTest() HubConfig { return defaults().Hub }
+
+// LXMFNotifySuffix is appended to Name when no lxmf_display_name is
+// configured.
+const LXMFNotifySuffix = " — RRC notifications"
+
+// LXMFName is the display name for the hub's lxmf.delivery announce.
+//
+// Defaults to the hub name plus a suffix saying what the destination
+// is, because the alternative is what shipped before: the hub appearing
+// twice in an announce list under one name, once as a room to join and
+// once as somebody to message. Only the first of those is true.
+func (h HubConfig) LXMFName() string {
+	if n := strings.TrimSpace(h.LXMFDisplayName); n != "" {
+		return n
+	}
+	name := strings.TrimSpace(h.Name)
+	if name == "" {
+		return "RRC notifications"
+	}
+	return name + LXMFNotifySuffix
+}
 
 // VersionPrefix and DefaultVersion are the software version advertised
 // to clients in WELCOME.
