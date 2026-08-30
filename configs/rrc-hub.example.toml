@@ -200,19 +200,23 @@ history_pull_bytes = 16384               # (default 16384)
 
 # --- mention notifications --------------------------------------------
 #
-# Off by default. When on, a message that names someone — "@alice", or
-# "@" plus 6+ characters of their identity hash — reaches them even if
-# they were not in the room:
+# On by default. A message that names someone — "@alice", or "@" plus
+# 6+ characters of their identity hash — reaches them even if they were
+# not in the room:
 #
 #   * in the room already  -> nothing; they got the message itself
 #   * connected elsewhere  -> a NOTICE right away
 #   * not connected        -> held, and delivered when they next connect
+#   * not connected, and mention_lxmf on -> sent to their LXMF inbox,
+#                             so they find out without coming back
 #
-# Resolution is deliberately conservative. RRC nicknames are advisory
-# and not unique, so an ambiguous "@name" notifies nobody rather than
-# guessing; the hash-prefix form is the way to be certain.
+# Resolution is deliberately conservative. An ambiguous "@name" notifies
+# nobody rather than guessing; the hash-prefix form is always certain.
+# With unique_nicks on (also the default) ambiguity is rare, because the
+# hub grants each identity a name nobody else holds.
 #
-# Anyone can turn this off for themselves with /notify off.
+# Anyone can turn this off for themselves with /notify off, and check
+# whether it reaches them with /notify test.
 # Make the hub GRANT a nickname rather than accept one: the first
 # identity to claim a name keeps it, and a later claimant becomes sam1,
 # sam2, and so on. A name is owned by an identity, so it survives
