@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
+	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
 )
 
 // allNoticeText joins every NOTICE a link received. The listing
@@ -213,5 +215,122 @@ func TestNoticeLinesRespectATightenedBodyLimit(t *testing.T) {
 		if len(n) > 64 {
 			t.Errorf("NOTICE of %d bytes exceeds max_msg_body_bytes=64: %q", len(n), n)
 		}
+	}
+}
+
+// --- how a command reply reaches the client ---------------------------
+
+// noticeRooms returns the K_ROOM of every NOTICE a link received, with
+// nil for a roomless one.
+func noticeRooms(t *testing.T, link *fakeLink) []*string {
+	t.Helper()
+	var out []*string
+	for _, f := range link.frames() {
+		env, err := rrc.Decode(f)
+		if err != nil || env.Type != rrc.TNotice {
+			continue
+		}
+		out = append(out, env.Room)
+	}
+	return out
+}
+
+// reticulum-mobile-app treats a NOTICE arriving with no K_ROOM right
+// after a command as that command's reply and renders it inline in the
+// room it was typed in (RrcSession.consumeAsCommandReply). One that
+// DOES carry a room takes the other branch and lands in `lastNotice` —
+// a single transient banner field, overwritten by whatever arrives
+// next. So a room-scoped reply is not "a reply in the room", it is a
+// reply the user mostly does not see: /help and /version were reported
+// as not working for exactly this reason.
+func TestCommandRepliesCarryNoRoom(t *testing.T) {
+	h := quietHub()
+	id := bytes.Repeat([]byte{0xA1}, 16)
+	s, link := connect(t, h, id)
+	join(t, s, id, "lobby", "")
+
+	for _, c := range []string{"/version", "/help", "/whoami"} {
+		before := len(noticeRooms(t, link))
+		cmd(t, s, id, "lobby", c)
+		for i, room := range noticeRooms(t, link)[before:] {
+			if room != nil {
+				t.Errorf("%s reply frame %d carried room %q; the client files that "+
+					"in a transient banner instead of the room", c, i, *room)
+			}
+		}
+	}
+}
+
+// The same correlation is consumed after a SINGLE notice, so a reply
+// split across frames has its first line rendered and the rest
+// scattered. A long listing must therefore arrive as one payload — an
+// RNS Resource, the mechanism the greeting already uses for a large
+// MOTD.
+func TestALongCommandReplyIsOneResourceNotManyNotices(t *testing.T) {
+	h := quietHubCfg(config.HubConfig{EnableResourceTransfer: true, MaxResourceBytes: 262144})
+	id := bytes.Repeat([]byte{0xA1}, 16)
+	s, link := connect(t, h, id)
+	before := len(noticesOn(t, link))
+
+	cmd(t, s, id, "", "/help")
+
+	// tryResourceSend hands the transfer to a goroutine.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(link.resourcePayloads()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := len(link.resourcePayloads()); got != 1 {
+		t.Fatalf("/help sent %d resources, want 1", got)
+	}
+	if got := noticesOn(t, link)[before:]; len(got) != 0 {
+		t.Errorf("/help also sent %d NOTICE frame(s); the client would scatter them:\n%v",
+			len(got), got)
+	}
+	body := string(link.resourcePayloads()[0])
+	if !strings.Contains(body, "/notify") || !strings.Contains(body, "/link") {
+		t.Errorf("the resource payload is not the help text:\n%s", body)
+	}
+}
+
+// A hub with resource transfer off, or a link that cannot carry one,
+// must still answer — chunked, and still roomless.
+func TestALongReplyFallsBackToChunkedNoticesWithoutResources(t *testing.T) {
+	h := quietHub() // EnableResourceTransfer is off
+	id := bytes.Repeat([]byte{0xA1}, 16)
+	s, link := connect(t, h, id)
+	before := len(noticesOn(t, link))
+
+	cmd(t, s, id, "", "/help")
+
+	got := noticesOn(t, link)[before:]
+	if len(got) < 2 {
+		t.Fatalf("expected /help to fall back to several NOTICEs, got %d", len(got))
+	}
+	if !strings.Contains(strings.Join(got, "\n"), "/notify") {
+		t.Error("the chunked fallback lost the help text")
+	}
+}
+
+// A reply that fits in one frame must BE one frame. chunkTextN splits
+// on line boundaries and never merges, so routing every reply through
+// it left a five-line /version as five NOTICEs — and the client renders
+// only the first of those inline.
+func TestAReplyThatFitsIsASingleNotice(t *testing.T) {
+	h := quietHubCfg(config.HubConfig{Name: "Test Hub", MentionNotify: true})
+	id := bytes.Repeat([]byte{0xA1}, 16)
+	s, link := connect(t, h, id)
+	before := len(noticesOn(t, link))
+
+	cmd(t, s, id, "", "/version")
+
+	got := noticesOn(t, link)[before:]
+	if len(got) != 1 {
+		t.Fatalf("/version sent %d NOTICEs, want 1:\n%v", len(got), got)
+	}
+	if !strings.Contains(got[0], "\n") {
+		t.Error("the single NOTICE lost its line structure")
+	}
+	if !strings.Contains(got[0], "Test Hub") || !strings.Contains(got[0], "mention notification") {
+		t.Errorf("the single NOTICE lost content:\n%s", got[0])
 	}
 }

@@ -459,33 +459,73 @@ func (s *Session) cmdMOTD(_ []string, room string) {
 
 // --- outbound helper --------------------------------------------------
 
-// sendNoticeLines sends lines as as few NOTICEs as they fit into.
+// sendNoticeLines delivers a command's reply.
 //
-// sendNotice is one envelope, and these listings run past what a hub
-// with a tightened max_msg_body_bytes will carry — a /help that is
-// silently dropped for exceeding a limit is worse than no /help. Lines
-// are packed rather than sent one per NOTICE because each envelope is a
-// separate frame, and these clients may be a LoRa hop away.
-func (s *Session) sendNoticeLines(room *string, lines []string) {
+// Two properties, both learned from the reference client rather than
+// chosen for elegance, and both load-bearing:
+//
+//  1. **Roomless.** reticulum-mobile-app treats a NOTICE that arrives
+//     with no K_ROOM right after a command as that command's reply, and
+//     renders it inline in the room the command was typed in
+//     (RrcSession.consumeAsCommandReply). A NOTICE that DOES carry a
+//     room takes the other branch and lands in `lastNotice` — a single
+//     transient banner field, overwritten by whatever arrives next. So
+//     a room-scoped reply is not "a reply in the room", it is a reply
+//     the user mostly does not see. /help and /version were reported
+//     as simply not working for exactly this reason.
+//
+//  2. **One payload.** That same correlation is consumed after a SINGLE
+//     notice, so a reply split across frames has its first line
+//     rendered and the rest scattered into the banner. A long listing
+//     therefore goes as one RNS Resource — the mechanism the greeting
+//     already uses for a large MOTD, and one every deployed client
+//     handles — and falls back to chunked notices only when resources
+//     are unavailable.
+//
+// The room argument is retained because callers know it and a future
+// client may want it; it is deliberately not put on the wire here.
+func (s *Session) sendNoticeLines(_ *string, lines []string) {
+	text := strings.Join(lines, "\n")
+	if text == "" {
+		return
+	}
+
 	budget := maxNoticeChunkChars
 	if m := s.hub.limits.MaxMsgBodyBytes; m > 0 && m < budget {
 		budget = m
 	}
 
+	// Whatever fits in one frame goes in one frame, newlines and all —
+	// as /stats has always done. chunkTextN must NOT be used for this:
+	// it splits on line boundaries and never merges, so a five-line
+	// reply well under the limit still left as five frames, and the
+	// client rendered only the first.
+	if len(text) <= budget {
+		s.sendNotice(nil, text)
+		return
+	}
+
+	// Too big for a frame: one Resource, which is the only shape that
+	// arrives whole. tryResourceSend falls back to chunks itself if the
+	// transfer fails.
+	if s.tryResourceSend([]byte(text), rrc.ResKindNotice, nil) {
+		return
+	}
+
+	// No resource transfer available. Pack lines up to the budget so
+	// there are as few frames as possible, rather than one per line.
 	var cur strings.Builder
 	flush := func() {
 		if cur.Len() > 0 {
-			s.sendNotice(room, cur.String())
+			s.sendNotice(nil, cur.String())
 			cur.Reset()
 		}
 	}
 	for _, line := range lines {
-		// A single over-long line is chunked on its own rather than
-		// dropped; chunkText is rune-safe.
 		if len(line) > budget {
 			flush()
 			for _, c := range chunkTextN(line, budget) {
-				s.sendNotice(room, c)
+				s.sendNotice(nil, c)
 			}
 			continue
 		}
