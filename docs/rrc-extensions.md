@@ -1,8 +1,20 @@
 # RRC extension keys — replies and reactions
 
-**Status:** proposed, v1 draft. Implemented by `rrc-hub` (this repo) and
-`reticulum-mobile-app`. Offered to other RRC implementations as a
-convention, not as a change to RRC itself.
+**Status:** proposed, v1 draft. The hub-side contract in §1 is
+implemented by `rrc-hub` (this repo) — see "How `rrc-hub` implements
+it" at the end of §1, and `internal/hub/extensions_test.go` for the
+proof. Client support is a separate question and is **not** claimed
+here: check the client. Offered to other RRC implementations as a convention, not as a
+change to RRC itself.
+
+> An earlier revision of this document said "Implemented by `rrc-hub`
+> and `reticulum-mobile-app`". That was the intent, not the state: the
+> hub dropped every extension key on fan-out, because it rebuilds each
+> envelope it forwards (to rewrite `K_SRC` to the link-verified
+> identity) and `rrc.Envelope` had nowhere to keep a key it did not
+> know. A client pair could have implemented replies perfectly and they
+> would have vanished in transit, silently. Do not write "implemented"
+> here before a test proves it.
 
 RRC has no reply or reaction message. Clients that support both
 elsewhere — the mobile app models them for LXMF today — cannot use them
@@ -49,6 +61,26 @@ A hub implementing this specification:
 That is the whole hub-side contract. Everything below is a client
 convention layered on top of it, and a second extension can be added
 later without touching the hub again.
+
+### How `rrc-hub` implements it
+
+`rrc.Envelope.Ext` (`map[uint64]any`) holds keys `>= rrc.ExtKeyMin`.
+`Decode` collects them, `Encode` re-emits them **after** the core keys
+so nothing a client sends can overwrite one the hub set. Keys `8..63`
+are not collected at all, so they continue to be dropped.
+
+`Session.handleMsg` calls `Envelope.ExtEncodedLen()` and rejects the
+frame when it exceeds `maxExtBytes` (128) — before fan-out, and with an
+ERROR to the sender rather than a truncation.
+
+`history.Record.Ext` (CBOR key 8, `omitempty`) retains them, so a
+replayed reply still threads. Records written before this simply lack
+the key and decode to nil.
+
+Pinned by `internal/hub/extensions_test.go`: verbatim relay of every key
+in §2, reserved keys still dropped, `K_SRC` unforgeable through the
+extension range, oversized payloads rejected rather than truncated, and
+threading surviving a replay.
 
 ---
 

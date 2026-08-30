@@ -31,6 +31,22 @@ type Envelope struct {
 	Room        *string
 	Body        any
 	Nick        *string
+
+	// Ext carries extension keys (>= ExtKeyMin) verbatim, so a hub can
+	// relay what it does not understand.
+	//
+	// It exists because the hub REBUILDS every envelope it forwards —
+	// it has to, in order to rewrite K_SRC to the link-verified
+	// identity, which is what stops a client speaking as somebody else.
+	// Without somewhere to put them, keys the struct has no field for
+	// are silently dropped on that rebuild, and a client feature built
+	// on them fails with no error anywhere. Replies and reactions
+	// (docs/rrc-extensions.md) are exactly that.
+	//
+	// Keys 8..63 are deliberately NOT collected: they belong to a
+	// future RRC core, and a hub that passed them through would let a
+	// client pre-empt a key the spec has not assigned yet.
+	Ext map[uint64]any
 }
 
 var (
@@ -92,6 +108,15 @@ func (e *Envelope) Encode() ([]byte, error) {
 	}
 	if e.Nick != nil {
 		m[KNick] = *e.Nick
+	}
+	// Extension keys last, and only in their own range: a core key is
+	// the hub's to set (K_SRC above all), and nothing a client sends
+	// may overwrite one.
+	for k, v := range e.Ext {
+		if k < ExtKeyMin {
+			continue
+		}
+		m[int(k)] = v
 	}
 	return canonicalEnc.Marshal(m)
 }
@@ -159,7 +184,43 @@ func fromMap(m map[any]any) (*Envelope, error) {
 		Room:        room,
 		Body:        valueOf(m, KBody),
 		Nick:        nick,
+		Ext:         extFrom(m),
 	}, nil
+}
+
+// extFrom collects the extension keys from a decoded envelope map.
+// Returns nil when there are none, so an ordinary envelope carries no
+// extra allocation and Encode emits exactly what it always did.
+func extFrom(m map[any]any) map[uint64]any {
+	var ext map[uint64]any
+	for k, v := range m {
+		u, ok := asUint(k)
+		if !ok || u < ExtKeyMin {
+			continue
+		}
+		if ext == nil {
+			ext = make(map[uint64]any, 2)
+		}
+		ext[u] = v
+	}
+	return ext
+}
+
+// ExtEncodedLen is the encoded size of the extension keys, used to
+// enforce the cap a hub must apply before relaying them.
+func (e *Envelope) ExtEncodedLen() (int, error) {
+	if len(e.Ext) == 0 {
+		return 0, nil
+	}
+	m := make(map[int]any, len(e.Ext))
+	for k, v := range e.Ext {
+		m[int(k)] = v
+	}
+	b, err := canonicalEnc.Marshal(m)
+	if err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
 
 // --- map helpers — CBOR decode yields uint64 keys, builders use int ---

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/hex"
+	"fmt"
 	"sync"
 	"unicode/utf8"
 
@@ -611,6 +612,19 @@ func (s *Session) handleMsg(env *rrc.Envelope, typ int) {
 	h.touchRoom(r)
 	recipients := roomLinksLocked(r)
 	h.mu.Unlock()
+
+	// Bound the extension keys BEFORE fan-out (docs/rrc-extensions.md
+	// §5). A hub is an amplifier — one inbound frame becomes one per
+	// room member — so bytes it relays without reading are multiplied
+	// by the room size. Rejected rather than truncated: silently
+	// dropping half of somebody's reply reference produces a message
+	// that looks fine and threads wrongly, which is worse than an
+	// error the sender can see.
+	if n, err := env.ExtEncodedLen(); err != nil || n > maxExtBytes {
+		s.sendError(&room, fmt.Sprintf(
+			"extension keys exceed the hub limit (%d bytes)", maxExtBytes))
+		return
+	}
 
 	// Rewrite K_SRC to verified identity, stamp nick.
 	//
