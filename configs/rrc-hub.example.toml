@@ -92,6 +92,13 @@ room_registry_path = "rooms.toml"
 # A room that already exists in rooms.toml is left exactly as it is;
 # this only ensures the room EXISTS, and never resets a topic, mode,
 # operator or ban somebody set deliberately.
+#
+# Rooms listed here are exempt from room_registry_prune_after. They are
+# only created at startup, so pruning one would leave it gone until the
+# next restart — and /list would then advertise nothing to the next
+# visitor, which is the empty-prompt problem this setting exists to
+# solve. Drop a name from this list and its room becomes prunable again
+# on the next tick, no restart needed.
 default_rooms = ["lobby"]
 
 # Path to the persisted kline list. Empty disables kline persistence.

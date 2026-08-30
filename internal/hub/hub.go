@@ -644,11 +644,53 @@ func (h *Hub) pruneLoop(ctx context.Context) {
 	}
 }
 
+// defaultRoomSet is the configured default rooms, normalized, as a set.
+//
+// Derived from the live config on each call rather than recorded as a
+// flag on the Room. A flag would go stale in the direction that
+// matters: an operator who REMOVES a room from default_rooms is saying
+// the hub need not keep it any more, and the room should become
+// prunable again — which reading the config gives for free and a flag
+// set at creation would not. The list is a handful of names, so the
+// walk costs nothing on a timer that runs every half hour.
+func (h *Hub) defaultRoomSet() map[string]struct{} {
+	if len(h.cfg.DefaultRooms) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(h.cfg.DefaultRooms))
+	for _, raw := range h.cfg.DefaultRooms {
+		// normalizeRoomName rather than normalizeDefaultRoom: the
+		// latter logs, and a misconfigured entry would then complain
+		// on every prune tick forever. ensureDefaultRooms already
+		// reported it once, at startup, which is where an operator
+		// will look.
+		if name := normalizeRoomName(raw); isValidRoomName(name, h.limits.MaxRoomNameBytes) {
+			out[name] = struct{}{}
+		}
+	}
+	return out
+}
+
 func (h *Hub) doPrune() {
 	cutoff := h.nowUnix() - h.cfg.RoomRegistryPruneAfter.Duration.Seconds()
+	defaults := h.defaultRoomSet()
 	h.mu.Lock()
 	var pruned []string
 	for name, r := range h.rooms {
+		// A default room is exempt. ensureDefaultRooms runs only at
+		// startup, so pruning one deletes a room the operator declared
+		// should always exist and leaves it gone until the next
+		// restart — and "/list" then advertises nothing to the next
+		// visitor, which is the empty-prompt problem default_rooms was
+		// added to solve. Idleness is evidence a conversation ended,
+		// not evidence the room should stop existing.
+		//
+		// Exempted rather than deleted-and-recreated: recreation would
+		// lose the topic, operators, modes and bans somebody set, and
+		// ensureDefaultRooms deliberately never resets those.
+		if _, isDefault := defaults[name]; isDefault {
+			continue
+		}
 		if r.registered && len(r.members) == 0 && r.lastUsedTS < cutoff {
 			delete(h.rooms, name)
 			pruned = append(pruned, name)
