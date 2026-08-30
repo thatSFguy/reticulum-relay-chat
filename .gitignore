@@ -13,6 +13,11 @@ hub_identity
 /rrc-hub.toml
 *.log
 
+# The test clients' virtualenv and the identity files they create.
+/venv/
+/tools/venv/
+*.identity
+
 # Runtime state a running hub writes beside itself, at the default paths
 # in rrc-hub.example.toml. peers.toml is the one that matters: it holds
 # real users' public keys, nicknames and any mentions still waiting for
