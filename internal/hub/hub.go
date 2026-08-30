@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/hex"
 	"log"
-	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -58,11 +57,21 @@ const unwelcomedIdleTimeout = 60 * time.Second
 // methods are safe for concurrent use.
 type Hub struct {
 	identityHash []byte // hub's own 16-byte RNS identity hash
-	cfg          config.HubConfig
-	limits       rrc.Limits
-	now          func() int64 // wall-clock milliseconds
-	log          *log.Logger
-	startedAt    int64
+	// destHash is the hub's rrc.hub DESTINATION hash — what a client
+	// dials, as distinct from identityHash, which is what the hub signs
+	// as. Set by the service layer, which is what derives it; empty in
+	// tests and in any embedding that never told us.
+	//
+	// It is here for one reason: a mention notification lands in a
+	// general messaging app with no way back to the hub, and RRC has no
+	// URI scheme to offer a tappable link. The destination hash is the
+	// one thing a client can actually be pointed at.
+	destHash  []byte
+	cfg       config.HubConfig
+	limits    rrc.Limits
+	now       func() int64 // wall-clock milliseconds
+	log       *log.Logger
+	startedAt int64
 
 	mu       sync.Mutex
 	rooms    map[string]*Room
@@ -84,6 +93,10 @@ type Hub struct {
 	// retries rather than losing a notification.
 	notifier OfflineNotifier
 	lastPush map[string]time.Time
+	// lastNotifyTest throttles /notify test per identity. In-memory
+	// only: it guards shared airtime, not correctness, and a restart
+	// forgetting it costs at most one extra test per peer.
+	lastNotifyTest map[string]time.Time
 
 	trusted map[string]struct{} // server-op identity hashes (hex)
 	banned  map[string]struct{} // config-banned ∪ kline hashes (hex)
@@ -112,19 +125,20 @@ func New(identityHash []byte, cfg config.HubConfig, logger *log.Logger) *Hub {
 		lim = rrc.DefaultLimits()
 	}
 	h := &Hub{
-		identityHash: identityHash,
-		cfg:          cfg,
-		limits:       lim,
-		now:          func() int64 { return time.Now().UnixMilli() },
-		log:          logger,
-		startedAt:    time.Now().UnixMilli(),
-		rooms:        make(map[string]*Room),
-		sessions:     make(map[*Session]struct{}),
-		peers:        make(map[string]*peerreg.Peer),
-		lastPush:     make(map[string]time.Time),
-		trusted:      make(map[string]struct{}),
-		banned:       make(map[string]struct{}),
-		klines:       make(map[string]struct{}),
+		identityHash:   identityHash,
+		cfg:            cfg,
+		limits:         lim,
+		now:            func() int64 { return time.Now().UnixMilli() },
+		log:            logger,
+		startedAt:      time.Now().UnixMilli(),
+		rooms:          make(map[string]*Room),
+		sessions:       make(map[*Session]struct{}),
+		peers:          make(map[string]*peerreg.Peer),
+		lastPush:       make(map[string]time.Time),
+		lastNotifyTest: make(map[string]time.Time),
+		trusted:        make(map[string]struct{}),
+		banned:         make(map[string]struct{}),
+		klines:         make(map[string]struct{}),
 	}
 	h.reloadTrust()
 	h.loadKlines()
@@ -272,7 +286,28 @@ func (h *Hub) loadRegistry() {
 		return
 	}
 	for name, rec := range recs {
-		h.rooms[name] = roomFromRecord(name, rec)
+		// Normalize on the way in: a rooms.toml written before room
+		// names were normalized can hold a "#lobby" that no client can
+		// now reach, because every JOIN for it resolves to "lobby".
+		// Stripping it here retires the stray entry, and the first
+		// registry flush rewrites the file without it.
+		norm := normalizeRoomName(name)
+		if norm == "" {
+			h.log.Printf("hub: dropping registry room %q — empty after normalization", name)
+			h.markRegistryDirtyLocked()
+			continue
+		}
+		if norm != name {
+			h.log.Printf("hub: registry room %q normalized to #%s", name, norm)
+			h.markRegistryDirtyLocked()
+		}
+		// An earlier, already-normalized entry wins: it is the one
+		// clients have been reaching, so it holds the live topic, ops
+		// and modes.
+		if _, exists := h.rooms[norm]; exists && norm != name {
+			continue
+		}
+		h.rooms[norm] = roomFromRecord(norm, rec)
 	}
 }
 
@@ -325,8 +360,7 @@ func (h *Hub) ensureDefaultRooms() {
 // here, not less: this name goes into rooms.toml at startup, and an
 // invalid one would make the registry unloadable on the next boot.
 func (h *Hub) normalizeDefaultRoom(raw string) (string, bool) {
-	name := strings.TrimSpace(raw)
-	name = strings.TrimPrefix(name, "#")
+	name := normalizeRoomName(raw)
 	if name == "" {
 		return "", false
 	}
@@ -340,6 +374,23 @@ func (h *Hub) normalizeDefaultRoom(raw string) (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+// SetDestHash records the hub's own destination hash for the
+// "how to get back" line in an offline notification. Call before Start.
+func (h *Hub) SetDestHash(dest []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.destHash = append([]byte(nil), dest...)
+}
+
+// destHashHexLocked renders the destination hash, or "" when unset.
+// Caller must hold h.mu.
+func (h *Hub) destHashHexLocked() string {
+	if len(h.destHash) == 0 {
+		return ""
+	}
+	return hex.EncodeToString(h.destHash)
 }
 
 // nowUnix returns the current wall clock in unix seconds.

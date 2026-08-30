@@ -368,3 +368,77 @@ func (n *lxmfNotifier) sendDirect(dest []byte, title, body string) error {
 	}
 	return err
 }
+
+// DiagnoseRoute describes, without sending anything, how this notifier
+// would reach a peer. It implements hub.NotifyDiagnoser.
+//
+// Everything here is already in the hub's log at the moment a
+// notification fails. The point of restating it is that the person it
+// failed to reach cannot read that log, and the two facts they most
+// need — the address the hub derived for them, and whether the hub has
+// ever heard that address announce — are the two that decide whether
+// the problem is on the hub's side or in the identity their messaging
+// client uses.
+func (n *lxmfNotifier) DiagnoseRoute(pubKey []byte) hub.NotifyRoute {
+	dest, err := lxmfaddr.DeliveryDest(pubKey)
+	if err != nil {
+		return hub.NotifyRoute{Address: "(cannot derive an address from your key: " + err.Error() + ")"}
+	}
+	route := hub.NotifyRoute{Address: fmt.Sprintf("%x", dest)}
+
+	// Announced is read the same way NotifyAbsent reads it: a cached
+	// announce with app_data is what carries the §5.7.4 stamp_cost, and
+	// nothing else does.
+	if cached := n.svc.transport.Recall(dest); cached != nil && len(cached.AppData) > 0 {
+		route.Announced = true
+	} else {
+		route.Notes = append(route.Notes,
+			"the hub has not heard that address announce, so it cannot meet a stamp requirement if you set one")
+	}
+
+	// The store-and-forward fallback, which only matters when the
+	// direct route does not answer.
+	if nodes := n.nodes.Select(n.fanout); len(nodes) > 0 {
+		route.Notes = append(route.Notes,
+			fmt.Sprintf("fallback: %d store-and-forward node(s) usable — but a node holds a message until YOUR client syncs from it, and no announce says which node that is", len(nodes)))
+	} else if n.warmingUp() {
+		route.Notes = append(route.Notes,
+			"fallback: no store-and-forward node known yet — the hub started recently and is still learning the mesh")
+	} else {
+		route.Notes = append(route.Notes,
+			"fallback: no store-and-forward node usable, so a notification only lands if you are directly reachable")
+	}
+	return route
+}
+
+// NotifyDirect delivers over route 1 only, with no store-and-forward
+// fallback. It implements hub.DirectNotifier.
+//
+// The stamp caveat is the same one NotifyAbsent applies, and for the
+// same reason: a client that enforces §5.7.4 stamps still proofs the
+// RNS packet before dropping the LXMF body, so a proof from a peer we
+// have never heard announce is not evidence the message survived.
+// Reporting that as success would be exactly the lie this command
+// exists to expose.
+func (n *lxmfNotifier) NotifyDirect(pubKey []byte, title, body string) error {
+	known, err := lxmfaddr.KnownDelivery(pubKey)
+	if err != nil {
+		return err
+	}
+	ensureAddressable(n.svc.transport, known)
+
+	knowStampPolicy := false
+	if cached := n.svc.transport.Recall(known.DestHash); cached != nil && len(cached.AppData) > 0 {
+		knowStampPolicy = true
+	}
+
+	if err := n.sendDirect(known.DestHash, title, body); err != nil {
+		n.svc.log.Printf("lxmf: direct-only delivery to %x failed: %v", known.DestHash[:4], err)
+		return err
+	}
+	n.svc.log.Printf("lxmf: delivered to %x directly (proof received)", known.DestHash[:4])
+	if !knowStampPolicy {
+		return fmt.Errorf("%w: %x has never announced", hub.ErrDeliveredUnconfirmed, known.DestHash[:4])
+	}
+	return nil
+}

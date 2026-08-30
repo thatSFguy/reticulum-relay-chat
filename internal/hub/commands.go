@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -27,48 +28,45 @@ func dispatchBody(body string) string {
 
 // handleCommand parses and dispatches a hub-local slash command. room is
 // the envelope K_ROOM ("the current room").
+//
+// Dispatch reads the same table /help prints, so a command cannot exist
+// without being documented and /help cannot advertise one that is not
+// wired up. That drift is not hypothetical: the shipped default
+// greeting told every arriving client "/help for commands" while the
+// hub answered "unrecognized command".
 func (s *Session) handleCommand(trimmed, _, room string) {
 	parts := strings.Fields(strings.TrimPrefix(trimmed, "/"))
 	if len(parts) == 0 {
-		s.sendError(roomPtr(room), "unrecognized command")
+		s.sendError(roomPtr(room), "unrecognized command — try /help")
 		return
 	}
 	cmd := strings.ToLower(parts[0])
-
-	switch cmd {
-	case "reload":
-		s.cmdReload(parts, room)
-	case "stats":
-		s.cmdStats(parts, room)
-	case "list":
-		s.cmdList(parts, room)
-	case "who", "names":
-		s.cmdWho(parts, room)
-	case "kick":
-		s.cmdKick(parts, room)
-	case "kline":
-		s.cmdKline(parts, room)
-	case "register":
-		s.cmdRegister(parts, room)
-	case "unregister":
-		s.cmdUnregister(parts, room)
-	case "topic":
-		s.cmdTopic(parts, room)
-	case "op", "deop", "voice", "devoice":
-		s.cmdOpVoice(cmd, parts, room)
-	case "mode":
-		s.cmdMode(parts, room)
-	case "ban":
-		s.cmdBan(parts, room)
-	case "invite":
-		s.cmdInvite(parts, room)
-	case "history":
-		s.cmdHistory(parts, room)
-	case "notify":
-		s.cmdNotify(parts, room)
-	default:
-		s.sendError(roomPtr(room), "unrecognized command")
+	spec := commandIndex[cmd]
+	if spec == nil {
+		// Echo what they typed, bounded: the token is attacker-supplied
+		// and may be as long as a whole message body, but it is also
+		// the single most useful thing to show back for a typo.
+		s.sendError(roomPtr(room), "unrecognized command '/"+snippet(cmd, 24)+"' — try /help")
+		return
 	}
+	// Server-op gating lives here so it is decided by the same table
+	// that decides whether /help lists the command at all. Handlers
+	// that already check keep their check: this is the filter, not the
+	// only lock.
+	if spec.serverOp && !s.isServerOp() {
+		s.sendError(roomPtr(room), "not authorized")
+		return
+	}
+	spec.run(s, parts, room)
+}
+
+// isServerOp reports whether this session's identity is a configured
+// server operator.
+func (s *Session) isServerOp() bool {
+	h := s.hub
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.isServerOp(s.identity())
 }
 
 // roomPtr returns a *string for room, or nil when room is "".
@@ -80,20 +78,23 @@ func roomPtr(room string) *string {
 	return &r
 }
 
-// validRoom validates a room-name argument against the configured limit.
-func (s *Session) validRoom(name string) error {
+// validRoom normalizes and validates a room-name argument. It returns
+// the name to use — callers must use the returned value, which is why
+// it is returned rather than validated in place.
+func (s *Session) validRoom(name string) (string, error) {
+	name = normalizeRoomName(name)
 	if name == "" {
-		return fmt.Errorf("empty room name")
+		return "", fmt.Errorf("empty room name")
 	}
 	// Reject invalid UTF-8 (audit A7): such a name would be persisted to
 	// rooms.toml and make the registry unloadable on the next restart.
 	if !utf8.ValidString(name) {
-		return fmt.Errorf("room name must be valid UTF-8")
+		return "", fmt.Errorf("room name must be valid UTF-8")
 	}
 	if m := s.hub.limits.MaxRoomNameBytes; m > 0 && len(name) > m {
-		return fmt.Errorf("room name exceeds the hub limit")
+		return "", fmt.Errorf("room name exceeds the hub limit")
 	}
-	return nil
+	return name, nil
 }
 
 // --- /reload ----------------------------------------------------------
@@ -205,7 +206,8 @@ func (s *Session) cmdWho(parts []string, room string) {
 		s.sendNotice(roomPtr(room), "usage: /who [room]")
 		return
 	}
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -248,7 +250,8 @@ func (s *Session) cmdKick(parts []string, room string) {
 		return
 	}
 	target := parts[1]
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -427,7 +430,8 @@ func (s *Session) cmdRegister(parts []string, room string) {
 		return
 	}
 	target := parts[1]
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -485,7 +489,8 @@ func (s *Session) cmdUnregister(parts []string, room string) {
 		return
 	}
 	target := parts[1]
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -527,7 +532,8 @@ func (s *Session) cmdTopic(parts []string, room string) {
 		return
 	}
 	target := parts[1]
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -599,7 +605,8 @@ func (s *Session) cmdOpVoice(cmd string, parts []string, room string) {
 		return
 	}
 	target := parts[1]
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -679,7 +686,8 @@ func (s *Session) cmdMode(parts []string, room string) {
 		return
 	}
 	target := parts[1]
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -848,7 +856,8 @@ func (s *Session) cmdBan(parts []string, room string) {
 		return
 	}
 	target := parts[1]
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -970,7 +979,8 @@ func (s *Session) cmdInvite(parts []string, room string) {
 		return
 	}
 	target := parts[1]
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -1130,7 +1140,8 @@ func (s *Session) cmdHistory(parts []string, room string) {
 		s.sendNotice(nil, "usage: /history [room] [count]")
 		return
 	}
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -1198,7 +1209,8 @@ func (s *Session) historyPurge(parts []string, room string) {
 		return
 	}
 	target := parts[2]
-	if err := s.validRoom(target); err != nil {
+	target, err := s.validRoom(target)
+	if err != nil {
 		s.sendNotice(roomPtr(room), "bad room: "+err.Error())
 		return
 	}
@@ -1218,17 +1230,155 @@ func (s *Session) historyPurge(parts []string, room string) {
 	s.sendNotice(roomPtr(target), "history for "+target+" purged")
 }
 
-// cmdNotify controls whether this identity is told about mentions it
-// missed.
+// cmdNotify is the whole of a peer's relationship with mention
+// notification: the preference, and the diagnosis when it appears not
+// to work.
 //
-//	/notify            — report the current setting
-//	/notify on|off     — change it
+//	/notify [status]    — what the hub will do, and whether it can
+//	/notify on|off      — change the preference
+//	/notify address     — where a notification would be sent
+//	/notify test        — send one now, direct route, answer in ~10s
+//	/notify test full   — the whole production path, including the
+//	                      store-and-forward fallback
 //
-// Consent matters here in a way it does not for the rest of the hub:
-// a mention notification can leave this hub entirely and arrive in
+// Consent matters here in a way it does not for the rest of the hub: a
+// mention notification can leave this hub entirely and arrive in
 // somebody's LXMF client, so anyone must be able to switch it off
 // without an operator's help.
+//
+// Diagnosis matters for a different reason. Every way this feature
+// fails — opted out, a nick that resolves to nobody, an LXMF identity
+// that is not the RRC one, a stamp the hub cannot meet, a propagation
+// node that accepts and serves nothing — fails SILENTLY, and the
+// evidence lands in a log the affected person cannot read. "It does not
+// work" is all they can report. These subcommands hand them the log
+// line instead.
 func (s *Session) cmdNotify(parts []string, room string) {
+	sub := "status"
+	if len(parts) >= 2 {
+		sub = strings.ToLower(parts[1])
+	}
+	switch sub {
+	case "status":
+		s.notifyStatus(room)
+	case "on", "yes", "enable", "off", "no", "disable":
+		s.notifySetPreference(sub, room)
+	case "address", "addr", "where":
+		s.notifyAddress(room)
+	case "test":
+		s.notifyTest(parts, room)
+	default:
+		s.sendNotice(roomPtr(room), "usage: /notify [status|on|off|address|test|test full]")
+	}
+}
+
+// notifyStatus reports what the hub will do for this peer and, where it
+// cannot, why.
+func (s *Session) notifyStatus(room string) {
+	h := s.hub
+	if !h.cfg.MentionNotify {
+		s.sendNoticeLines(roomPtr(room), []string{
+			"this hub does not send mention notifications",
+			"  its operator has not enabled mention_notify; being named here reaches you only if you are reading the room",
+		})
+		return
+	}
+	idHex := s.identityHex()
+	if idHex == "" {
+		s.sendError(roomPtr(room), "identify first")
+		return
+	}
+
+	h.mu.Lock()
+	p := h.peers[idHex]
+	optOut := p != nil && p.NotifyOptOut
+	pending := 0
+	var pubKey []byte
+	if p != nil {
+		pending = len(p.Mentions)
+		pubKey = append([]byte(nil), p.PublicKey...)
+	}
+	lastPush, pushed := h.lastPush[idHex]
+	knownNick := ""
+	if p != nil {
+		knownNick = p.Nick
+	}
+	h.mu.Unlock()
+
+	lines := []string{s.notifyStateLine()}
+	if optOut {
+		lines = append(lines, "  /notify on to switch them back on")
+		s.sendNoticeLines(roomPtr(room), lines)
+		return
+	}
+
+	// How you can be named at all. A mention resolves by nick only when
+	// that nick is unambiguous, and a peer with no nick can be named
+	// solely by hash — neither of which anybody would guess.
+	if knownNick != "" {
+		if n := h.identitiesWithNick(knownNick); n > 1 {
+			lines = append(lines, fmt.Sprintf(
+				"  you are @%s — but %d identities use that nick, so @%s alone names nobody. @%s always works",
+				knownNick, n, knownNick, idHex[:8]))
+		} else {
+			lines = append(lines, fmt.Sprintf("  you are named as @%s, or as @%s", knownNick, idHex[:8]))
+		}
+	} else {
+		lines = append(lines, fmt.Sprintf(
+			"  you have no nick, so you can only be named as @%s — your client sends a nick in HELLO", idHex[:8]))
+	}
+
+	// Whether anything can reach you while you are gone.
+	switch {
+	case !h.cfg.MentionLXMF:
+		lines = append(lines, "  while you are away: held here and handed over when you next connect (this hub does not forward over LXMF)")
+	case h.offlineNotifier() == nil:
+		lines = append(lines, "  while you are away: held here only — LXMF forwarding is configured but no notifier is running")
+	default:
+		if route, ok := h.notifyRoute(pubKey); ok {
+			lines = append(lines, "  while you are away: sent to "+route.Address)
+			if !route.Announced {
+				lines = append(lines, "    the hub has not heard that address announce. If that is not an address your")
+				lines = append(lines, "    messaging client owns, notifications cannot arrive — compare it with yours")
+			}
+			for _, n := range route.Notes {
+				lines = append(lines, "    "+n)
+			}
+		} else {
+			lines = append(lines, "  while you are away: sent over LXMF (the notifier cannot describe the route)")
+		}
+	}
+
+	if pending > 0 {
+		lines = append(lines, fmt.Sprintf("  %d mention(s) waiting — /mentions to read them", pending))
+	}
+	if pushed {
+		lines = append(lines, "  last send attempt "+humanAgo(time.Since(lastPush)))
+	}
+	lines = append(lines, "  /notify test sends one to yourself now and reports what happened")
+	s.sendNoticeLines(roomPtr(room), lines)
+}
+
+// identitiesWithNick counts directory entries claiming a nick. A count
+// above one is why a mention by that nick resolves to nobody.
+func (h *Hub) identitiesWithNick(nick string) int {
+	want := strings.ToLower(strings.TrimSpace(nick))
+	if want == "" {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, p := range h.peers {
+		if p.Nick != "" && strings.ToLower(p.Nick) == want {
+			n++
+		}
+	}
+	return n
+}
+
+// notifySetPreference records the opt-in/opt-out.
+func (s *Session) notifySetPreference(sub, room string) {
 	h := s.hub
 	if !h.cfg.MentionNotify {
 		s.sendNotice(roomPtr(room), "this hub does not send mention notifications")
@@ -1239,32 +1389,7 @@ func (s *Session) cmdNotify(parts []string, room string) {
 		s.sendError(roomPtr(room), "identify first")
 		return
 	}
-
-	if len(parts) < 2 {
-		h.mu.Lock()
-		optOut := false
-		if p, ok := h.peers[idHex]; ok {
-			optOut = p.NotifyOptOut
-		}
-		h.mu.Unlock()
-		state := "on"
-		if optOut {
-			state = "off"
-		}
-		s.sendNotice(roomPtr(room), "mention notifications are "+state+" (use /notify on|off)")
-		return
-	}
-
-	var optOut bool
-	switch strings.ToLower(parts[1]) {
-	case "on", "yes", "enable":
-		optOut = false
-	case "off", "no", "disable":
-		optOut = true
-	default:
-		s.sendNotice(roomPtr(room), "usage: /notify on|off")
-		return
-	}
+	optOut := sub == "off" || sub == "no" || sub == "disable"
 
 	h.mu.Lock()
 	p, ok := h.peers[idHex]
@@ -1288,7 +1413,190 @@ func (s *Session) cmdNotify(parts []string, room string) {
 
 	if optOut {
 		s.sendNotice(roomPtr(room), "mention notifications off; anything pending was discarded")
-	} else {
-		s.sendNotice(roomPtr(room), "mention notifications on")
+		return
+	}
+	s.sendNotice(roomPtr(room), "mention notifications on — /notify status for how you will be reached")
+}
+
+// notifyAddress prints where a notification would go.
+//
+// This one line settles the commonest cause of "notifications do not
+// work": a client whose messaging identity is not the identity it
+// connects to RRC with. The hub derives the destination from the key
+// proved at LINKIDENTIFY and has no way to know it is the wrong one —
+// but the person holding the phone can see in a second whether the
+// address matches theirs.
+func (s *Session) notifyAddress(room string) {
+	h := s.hub
+	idHex := s.identityHex()
+	if idHex == "" {
+		s.sendError(roomPtr(room), "identify first")
+		return
+	}
+	pubKey := s.PeerPublicKey()
+	if len(pubKey) == 0 {
+		s.sendNotice(roomPtr(room), "the hub holds no public key for you, so it cannot address you at all")
+		return
+	}
+	route, ok := h.notifyRoute(pubKey)
+	if !ok {
+		s.sendNotice(roomPtr(room), "this hub has no notifier that can reach you while you are away")
+		return
+	}
+	lines := []string{
+		"the hub would notify you at " + route.Address,
+		"  derived from the key you proved at connect — if your messaging client shows a",
+		"  different address, that is why nothing arrives",
+	}
+	if !route.Announced {
+		lines = append(lines, "  the hub has not heard this address announce; it does not know your stamp cost")
+	}
+	for _, n := range route.Notes {
+		lines = append(lines, "  "+n)
+	}
+	s.sendNoticeLines(roomPtr(room), lines)
+}
+
+// notifyTestInterval throttles /notify test per identity.
+//
+// The test is a real message over a real mesh — the whole point is that
+// it takes the production path and not a simulation of it — so it costs
+// airtime somebody else is sharing. Long enough that it cannot be used
+// to make the hub flood, short enough to iterate on a misconfiguration.
+const notifyTestInterval = 5 * time.Minute
+
+// notifyTest sends one notification to the caller, right now, through
+// exactly the path a real mention takes, and reports the verbatim
+// outcome.
+//
+// A dry run would be cheaper and would prove less. Three separate
+// incidents in this hub's history were fixes to a path that each worked
+// and changed nothing at the far end, because the failure was in a hop
+// the sending side cannot inspect: a node that accepts an upload and
+// serves nothing back, a recipient enforcing a stamp the hub could not
+// meet, a delivery destination the hub had registered but never
+// announced. None of those is visible without sending.
+func (s *Session) notifyTest(parts []string, room string) {
+	h := s.hub
+	if !h.cfg.MentionNotify {
+		s.sendNotice(roomPtr(room), "this hub does not send mention notifications")
+		return
+	}
+	idHex := s.identityHex()
+	if idHex == "" {
+		s.sendError(roomPtr(room), "identify first")
+		return
+	}
+	pubKey := s.PeerPublicKey()
+	if len(pubKey) == 0 {
+		s.sendNotice(roomPtr(room), "the hub holds no public key for you, so it cannot address you at all")
+		return
+	}
+	n := h.offlineNotifier()
+	if n == nil {
+		s.sendNotice(roomPtr(room), "this hub has no notifier that can reach you while you are away — a mention would be held until you next connect")
+		return
+	}
+
+	now := time.Now()
+	h.mu.Lock()
+	last, throttled := h.lastNotifyTest[idHex]
+	if throttled && now.Sub(last) < notifyTestInterval {
+		h.mu.Unlock()
+		s.sendNotice(roomPtr(room), "already tested recently; try again in "+
+			humanUptime(notifyTestInterval-now.Sub(last)))
+		return
+	}
+	h.lastNotifyTest[idHex] = now
+	h.sweepNotifyTestsLocked(now)
+	h.mu.Unlock()
+
+	hubName := h.cfg.Name
+	if hubName == "" {
+		hubName = "RRC hub"
+	}
+	title := hubName + ": notification test"
+	body := "This is a test notification you asked " + hubName +
+		" for with /notify test. If you are reading it in your messaging client, mention notifications reach you."
+
+	// The direct route by default; the whole production path on
+	// "/notify test full".
+	//
+	// The default is direct because this command's value is that the
+	// person who typed it READS the answer, and the full path often
+	// cannot deliver one in time: the fallback tries several
+	// propagation nodes, each costing up to 20 seconds when its LRPROOF
+	// times out. Measured here on a public mesh: 45 seconds to produce
+	// a result, by which point the client had disconnected and the
+	// answer went into a dead link ("rrc: link send failed: link no
+	// longer active"). The user saw "the result follows" and then
+	// nothing at all.
+	//
+	// Nothing diagnostic is lost by that default. A propagation upload
+	// is acknowledged by the NODE and never by the recipient, so its
+	// outcome is ErrDeliveredUnconfirmed whatever happens — it cannot
+	// answer "did it reach me?", which is what the user is asking.
+	//
+	// "full" exists for the question the OPERATOR asks instead: can
+	// this hub reach a propagation node at all? That is a real question
+	// with no other way to ask it, and it is worth the wait to someone
+	// who chose it deliberately.
+	full := len(parts) >= 3 && strings.EqualFold(parts[2], "full")
+	direct, _ := n.(DirectNotifier)
+	send := func() error {
+		if direct != nil && !full {
+			return direct.NotifyDirect(pubKey, title, body)
+		}
+		return n.NotifyAbsent(pubKey, title, body)
+	}
+	wait := "about ten seconds"
+	if full || direct == nil {
+		wait = "up to a minute — stay connected or you will miss it"
+	}
+
+	// The send blocks — a link handshake and a proof — and this is the
+	// inbound frame path. Answer immediately, report when there is
+	// something to report.
+	s.sendNotice(roomPtr(room), "sending a test notification to "+idHex[:8]+
+		"… — the result follows in "+wait)
+	go func() {
+		err := send()
+		var text string
+		switch {
+		case err == nil:
+			text = "test notification delivered, and your client acknowledged it. Mention notifications work for you."
+		case errors.Is(err, ErrDeliveredUnconfirmed):
+			text = "test notification sent, but nothing confirms it arrived: " + err.Error() +
+				" — if it did not appear in your messaging client, that client is probably not the identity you connect here with (/notify address)"
+		case errors.Is(err, ErrNotifierUnavailable):
+			text = "the hub had no route to even try: " + err.Error() +
+				" — this is normal for a minute or two after the hub starts. Try again shortly."
+		case full:
+			text = "every route failed: " + err.Error() +
+				" — neither a direct send nor any propagation node could take it."
+		default:
+			text = "no direct route to you: " + err.Error() +
+				" — a real mention would also try store-and-forward, which may still reach you, but nothing can confirm that. " +
+				"Check /notify address matches your messaging client, or /notify test full to try the fallback too."
+		}
+		h.log.Printf("notify test for %s…: %v", idHex[:8], err)
+		// A result nobody can read is worth a log line rather than a
+		// silent write into a closed link.
+		if s.isClosed() {
+			h.log.Printf("notify test for %s…: session gone before the result could be delivered", idHex[:8])
+			return
+		}
+		s.sendNotice(roomPtr(room), text)
+	}()
+}
+
+// sweepNotifyTestsLocked forgets throttle entries that can no longer
+// suppress anything, so the map cannot grow without bound as
+// identities come and go. Caller must hold h.mu.
+func (h *Hub) sweepNotifyTestsLocked(now time.Time) {
+	for id, last := range h.lastNotifyTest {
+		if now.Sub(last) >= notifyTestInterval {
+			delete(h.lastNotifyTest, id)
+		}
 	}
 }

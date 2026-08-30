@@ -40,6 +40,19 @@ type Session struct {
 
 	lastHistoryPullMs int64 // 0 = never; throttles /history (see cmdHistory)
 
+	// away is set by /away. It is a statement the peer makes about
+	// themselves, and the hub takes it at face value: a mention is then
+	// queued and pushed rather than written into the room the peer is
+	// sitting in but not reading.
+	//
+	// This exists because the hub's own presence test can only measure
+	// whether frames are arriving, and "my client is connected in a
+	// background tab" looks exactly like "I am here". Nothing else can
+	// tell the hub the difference.
+	away        bool
+	awayReason  string
+	awaySinceMs int64
+
 	expectations []*resourceExpectation
 }
 
@@ -82,6 +95,22 @@ func (h *Hub) NewSession(link Link) *Session {
 }
 
 func (s *Session) identity() []byte { return s.link.PeerIdentityHash() }
+
+// isClosed reports whether this session has been torn down. Used by
+// work that finishes after a delay, so it can tell "the answer was
+// delivered" from "the answer was written into a dead link".
+func (s *Session) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
+// isAway reports the peer's own /away state.
+func (s *Session) isAway() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.away
+}
 
 // PeerPublicKey returns the 64-byte public key this session's client
 // proved when it identified, or nil if it has not identified yet.
@@ -244,10 +273,21 @@ func (s *Session) handleHello(env *rrc.Envelope) {
 
 	s.mu.Lock()
 	s.welcomed = true
-	s.nick = nick
 	s.mu.Unlock()
 
-	h.log.Printf("session welcomed: %s (nick=%q)", shortHash(s.identity()), nick)
+	// The hub grants the nick rather than accepting it: see nicks.go.
+	// Done before WELCOME so everything downstream — the peer
+	// directory, fan-out, mention resolution — sees one name.
+	h.mu.Lock()
+	granted, renamed := s.setNickLocked(nick)
+	h.mu.Unlock()
+
+	if renamed {
+		h.log.Printf("session welcomed: %s (nick=%q, asked for %q)",
+			shortHash(s.identity()), granted, nick)
+	} else {
+		h.log.Printf("session welcomed: %s (nick=%q)", shortHash(s.identity()), granted)
+	}
 
 	// WELCOME body: hub name, version, limits. rrcd does not populate caps.
 	w := rrc.Welcome(h.identityHash, h.now(), h.cfg.Name, h.cfg.Version, h.limits, false)
@@ -258,6 +298,13 @@ func (s *Session) handleHello(env *rrc.Envelope) {
 
 	// Greeting (MOTD) after WELCOME.
 	s.sendGreeting()
+
+	// Nothing in RRC can carry "you asked for sam and you are sam1" —
+	// WELCOME has no field for it — so it is said in a NOTICE, which
+	// every deployed client already renders.
+	if renamed {
+		s.sendNotice(nil, nickTakenNotice(nick, granted))
+	}
 
 	// File this identity — its key is what makes it addressable later —
 	// then hand over anything that arrived while it was away.
@@ -277,6 +324,9 @@ func (s *Session) resetForReHello() {
 	s.nick = ""
 	s.welcomed = false
 	s.expectations = nil
+	s.away = false
+	s.awayReason = ""
+	s.awaySinceMs = 0
 	s.mu.Unlock()
 
 	type partedRoom struct {
@@ -323,7 +373,7 @@ func (s *Session) sendGreeting() {
 func (s *Session) handleJoin(env *rrc.Envelope) {
 	h := s.hub
 	id := s.identity()
-	room := rrc.RoomName(env)
+	room := roomFromEnvelope(env)
 	if room == "" {
 		s.sendError(nil, "JOIN requires room name")
 		return
@@ -456,7 +506,7 @@ func (s *Session) handleJoin(env *rrc.Envelope) {
 
 func (s *Session) handlePart(env *rrc.Envelope) {
 	h := s.hub
-	room := rrc.RoomName(env)
+	room := roomFromEnvelope(env)
 	if room == "" {
 		s.sendError(nil, "PART requires room name")
 		return
@@ -493,7 +543,7 @@ func (s *Session) handlePart(env *rrc.Envelope) {
 func (s *Session) handleMsg(env *rrc.Envelope, typ int) {
 	h := s.hub
 	id := s.identity()
-	room := rrc.RoomName(env)
+	room := roomFromEnvelope(env)
 
 	// Command dispatch — MSG and NOTICE only, never ACTION.
 	if typ != rrc.TAction {
@@ -563,15 +613,33 @@ func (s *Session) handleMsg(env *rrc.Envelope, typ int) {
 	h.mu.Unlock()
 
 	// Rewrite K_SRC to verified identity, stamp nick.
+	//
+	// A message may carry K_NICK, and the hub adopts it as the session
+	// nick — which is the second way a name is claimed, and so the
+	// second place uniqueness has to hold. Enforcing only at HELLO
+	// would be theatre: a client would re-assert the taken name here.
 	s.mu.Lock()
 	nick := s.nick
+	s.mu.Unlock()
+	var renamedTo string
 	if envNick := rrc.NickName(env); envNick != "" {
-		if n, ok := normalizeNick(envNick, h.limits.MaxNickBytes); ok {
-			s.nick = n
-			nick = n
+		if want, ok := normalizeNick(envNick, h.limits.MaxNickBytes); ok && want != nick {
+			h.mu.Lock()
+			granted, renamed := s.setNickLocked(want)
+			h.mu.Unlock()
+			// Notify on a change of the GRANTED name, not of the asked-for
+			// one. A client that keeps asserting a taken "sam" is granted
+			// "sam1" every time, and "sam" != "sam1" on every message —
+			// testing the request would repeat the notice forever.
+			if renamed && granted != nick {
+				renamedTo = granted
+			}
+			nick = granted
 		}
 	}
-	s.mu.Unlock()
+	if renamedTo != "" {
+		s.sendNotice(&room, nickTakenNotice(rrc.NickName(env), renamedTo))
+	}
 
 	env.Src = id
 	if nick != "" {

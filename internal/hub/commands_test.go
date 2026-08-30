@@ -23,8 +23,14 @@ func TestUnrecognizedCommand(t *testing.T) {
 	s, link := connect(t, h, id)
 	join(t, s, id, "lobby", "")
 	cmd(t, s, id, "lobby", "/frobnicate")
-	if got := lastError(t, link); got != "unrecognized command" {
-		t.Errorf("got %q want %q", got, "unrecognized command")
+	got := lastError(t, link)
+	// The typo is echoed back and /help is named: the shipped greeting
+	// points every arriving client at /help, so the error that follows
+	// a mistyped command is the one place that has to agree with it.
+	if !strings.Contains(got, "unrecognized command") ||
+		!strings.Contains(got, "frobnicate") ||
+		!strings.Contains(got, "/help") {
+		t.Errorf("got %q, want an unrecognized-command error naming frobnicate and /help", got)
 	}
 }
 

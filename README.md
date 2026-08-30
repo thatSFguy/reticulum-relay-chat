@@ -85,6 +85,86 @@ for more.
 Retaining plaintext conversation on disk is the operator's decision, so
 it is off by default.
 
+### Commands that answer for the hub
+
+`/help` lists the commands *you* can run and explains any one of them,
+and the table it prints is the same table dispatch reads, so the two
+cannot drift. It is the only place a newcomer is taught anything, which
+is why its footer names the one diagnostic that matters. `/version` reports what is switched on here, which used to
+be answerable only by `/stats` — an operator-only command.
+
+The rest exist because mention notification fails **silently**, in five
+distinct ways, and every one of them lands in a log the affected person
+cannot read:
+
+| | |
+|---|---|
+| `/notify` | your setting, how the hub would reach you, and what is stopping it |
+| `/notify address` | the address a notification goes to — compare it against your messaging client's own, since a client using a *different identity* is the commonest cause of nothing arriving |
+| `/notify test` | sends one through the production path now and reports the verbatim outcome (rate limited; it is real traffic) |
+| `/mentions` | what the hub is holding for you, and when it last tried to send it |
+| `/seen` | when someone was last heard from — and whether their nick is ambiguous, which is why a mention can resolve to nobody |
+| `/link [room]` | a link to a room you can paste anywhere |
+| `/whoami` | who the hub thinks you are |
+| `/away`, `/back` | you are connected but not reading, so send rather than show |
+
+`/away` closes a real gap: the hub's presence test can only measure
+whether frames are arriving, so a client left open in a background tab
+is indistinguishable from someone reading the room, and a mention in
+that state is written into the room and nowhere else.
+
+### Names that mean one person
+
+RRC nicknames are advisory and not unique — `K_NICK` is a display hint.
+That is fine until something has to act on a name, and then it is why
+mentions fail: resolution declines rather than guess between two people
+answering to "sam", so `@sam are you there` reaches neither of them and
+says nothing about having failed.
+
+So the hub **grants** a nick rather than accepting one. First claim
+wins; later claimants become `sam1`, `sam2`. A name is owned by an
+*identity*, so it survives disconnection — somebody who has been "sam"
+here for a year does not come back to find a stranger holding it — and
+the peer is told in an ordinary NOTICE, since nothing in RRC can carry
+"you asked for sam and you are sam1".
+
+Enforced at both entry points: `HELLO`, and the `K_NICK` a message may
+carry, which the hub adopts as the session nick. Enforcing only the
+first would be theatre. `unique_nicks = false` restores the old
+behaviour.
+
+### Rooms you can link to
+
+"Come to #ops" is not directions: there are many hubs, room names are
+not unique across them, and nothing said out loud carries which hub was
+meant. So a room has a written form:
+
+```
+rrc@43c8adb1172377a76b8f9ba41bb85e5c:/room/ops
+```
+
+That is not an invention. It is the link-target syntax NomadNet already
+uses (`SPEC §11.6.3`), with `rrc` as the aspect shorthand for `rrc.hub`,
+exactly as `nnn` is shorthand for `nomadnetwork.node` and `lxmf` for
+`lxmf.delivery`. Offline notifications carry one per room named — that
+message is read outside RRC entirely, which is the case the format
+exists for — and `/link [room]` prints one on demand for handing a room
+to somebody who is not here.
+
+It is plain text in a message body, so a client that has never heard of
+it shows it as text somebody can copy — which is more than a room name
+alone gives them. See [`docs/rrc-room-links.md`](docs/rrc-room-links.md)
+for the grammar and what a client should do with it.
+
+### Room names carry no `#`
+
+The sigil is decoration a client adds when it renders a room. A client
+that passes the typed line through used to create a room genuinely named
+`#lobby`, thereafter displayed `##lobby` — a second room, distinct from
+the one everyone else was in. Every room name is now normalized on the
+way in, at JOIN, in command arguments, in `default_rooms` and on
+registry load, so `#lobby` and `lobby` are one room.
+
 ### A lobby that is already there
 
 A brand new hub used to be an empty prompt: no rooms, `/list` reporting
@@ -319,6 +399,12 @@ The Reticulum stack — identity, packet, link, crypto, announce, TCP/HDLC
 transport, Resource transfer, and the LXMF layer this hub's notifications
 ride on — comes from
 [`reticulum-go`](https://github.com/thatSFguy/reticulum-go), shared with
-`reticulum-group-chat`. Requires **v0.5.0 or later**: earlier versions
-discard link context `0xFB`, so no client can identify and the hub is
-unusable.
+`reticulum-group-chat`. Requires **v0.7.0 or later**.
+
+Two link-DATA contexts are load-bearing and both were once discarded by
+the same `default: return`. Below v0.5.0, `0xFB` LINKIDENTIFY is dropped
+and no client can identify at all — the hub is unusable. Below v0.7.0,
+`0xFC` LINKCLOSE is dropped, so a clean disconnect goes unnoticed until
+a 30-second poll finds it, and anything keyed on "is this person here?"
+is wrong for that whole window — which for mention notification is the
+difference between a message held and a message lost.

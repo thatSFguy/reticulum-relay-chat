@@ -106,15 +106,15 @@ func TestAMentionWaitsForAnAbsentPeer(t *testing.T) {
 	idB := visitAndLeave(t, h, 0xB2, "bob")
 
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@bob are you around?")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@bob are you around?")
 
 	held := pendingFor(h, idB)
 	if len(held) != 1 {
 		t.Fatalf("got %d pending mentions, want 1", len(held))
 	}
-	if held[0].Room != "#lobby" || held[0].ByNick != "alice" {
-		t.Errorf("pending mention = %+v, want one in #lobby from alice", held[0])
+	if held[0].Room != "lobby" || held[0].ByNick != "alice" {
+		t.Errorf("pending mention = %+v, want one in lobby from alice", held[0])
 	}
 	if !strings.Contains(held[0].Text, "are you around") {
 		t.Errorf("mention text %q does not quote the message", held[0].Text)
@@ -129,7 +129,7 @@ func TestAMentionWaitsForAnAbsentPeer(t *testing.T) {
 	}
 	var found bool
 	for _, n := range notices {
-		if strings.Contains(n, "#lobby") && strings.Contains(n, "alice") {
+		if strings.Contains(n, "lobby") && strings.Contains(n, "alice") {
 			found = true
 		}
 	}
@@ -147,11 +147,11 @@ func TestNoNotificationForSomeoneAlreadyInTheRoom(t *testing.T) {
 	h := mentionHub(t, nil)
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
 	sb, linkB, idB := connectKeyed(t, h, 0xB2, "bob")
-	join(t, sa, idA, "#lobby", "")
-	join(t, sb, idB, "#lobby", "")
+	join(t, sa, idA, "lobby", "")
+	join(t, sb, idB, "lobby", "")
 
 	before := len(noticesOn(t, linkB))
-	say(t, sa, idA, "#lobby", "@bob hello")
+	say(t, sa, idA, "lobby", "@bob hello")
 
 	if got := pendingFor(h, idB); len(got) != 0 {
 		t.Errorf("queued %d mentions for a present member", len(got))
@@ -169,9 +169,9 @@ func TestAConnectedPeerOutsideTheRoomIsToldImmediately(t *testing.T) {
 	h := mentionHub(t, nil)
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
 	_, linkB, idB := connectKeyed(t, h, 0xB2, "bob")
-	join(t, sa, idA, "#lobby", "")
+	join(t, sa, idA, "lobby", "")
 
-	say(t, sa, idA, "#lobby", "@bob come join us")
+	say(t, sa, idA, "lobby", "@bob come join us")
 
 	if got := pendingFor(h, idB); len(got) != 0 {
 		t.Errorf("queued %d mentions for a connected peer", len(got))
@@ -189,8 +189,8 @@ func TestAnAmbiguousNicknameNotifiesNobody(t *testing.T) {
 	idC := visitAndLeave(t, h, 0xC3, "sam")
 
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@sam which one of you")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@sam which one of you")
 
 	if len(pendingFor(h, idB))+len(pendingFor(h, idC)) != 0 {
 		t.Error("an ambiguous nickname produced a notification")
@@ -204,8 +204,8 @@ func TestAHashPrefixResolvesUnambiguously(t *testing.T) {
 	idC := visitAndLeave(t, h, 0xC3, "sam")
 
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@"+hex.EncodeToString(idB)[:8]+" this one")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@"+hex.EncodeToString(idB)[:8]+" this one")
 
 	if len(pendingFor(h, idB)) != 1 {
 		t.Errorf("hash-prefix mention did not reach its target")
@@ -219,12 +219,12 @@ func TestAHashPrefixResolvesUnambiguously(t *testing.T) {
 func TestSelfMentionsAreIgnored(t *testing.T) {
 	h := mentionHub(t, nil)
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
+	join(t, sa, idA, "lobby", "")
 
 	// Leave the room so a mention would otherwise queue.
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TPart, idA, "#lobby", nil)))
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@alice talking to myself")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TPart, idA, "lobby", nil)))
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@alice talking to myself")
 
 	if got := pendingFor(h, idA); len(got) != 0 {
 		t.Errorf("self-mention queued %d notifications", len(got))
@@ -241,8 +241,8 @@ func TestOneMessageCannotNotifyEveryone(t *testing.T) {
 	}
 
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@n1 @n2 @n3 @n4 @n5 @n6 @n7 @n8 everyone")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@n1 @n2 @n3 @n4 @n5 @n6 @n7 @n8 everyone")
 
 	total := 0
 	for _, id := range ids {
@@ -263,9 +263,9 @@ func TestThePendingQueueIsBoundedAndKeepsTheNewest(t *testing.T) {
 	idB := visitAndLeave(t, h, 0xB2, "bob")
 
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
+	join(t, sa, idA, "lobby", "")
 	for _, text := range []string{"one", "two", "three", "four", "five"} {
-		say(t, sa, idA, "#lobby", "@bob "+text)
+		say(t, sa, idA, "lobby", "@bob "+text)
 	}
 
 	held := pendingFor(h, idB)
@@ -290,8 +290,8 @@ func TestNotifyOffStopsFurtherMentions(t *testing.T) {
 	sb.Close()
 
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@bob still there?")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@bob still there?")
 
 	if got := pendingFor(h, idB); len(got) != 0 {
 		t.Errorf("a mention queued for a peer who opted out: %+v", got)
@@ -301,7 +301,7 @@ func TestNotifyOffStopsFurtherMentions(t *testing.T) {
 	sb2, _, _ := connectKeyed(t, h, 0xB2, "bob")
 	sb2.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "", "/notify on")))
 	sb2.Close()
-	say(t, sa, idA, "#lobby", "@bob back on?")
+	say(t, sa, idA, "lobby", "@bob back on?")
 	if got := pendingFor(h, idB); len(got) != 1 {
 		t.Errorf("opting back in did not resume notifications (%d pending)", len(got))
 	}
@@ -314,9 +314,9 @@ func TestNotifyOffDiscardsWhatIsAlreadyWaiting(t *testing.T) {
 	idB := visitAndLeave(t, h, 0xB2, "bob")
 
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@bob one")
-	say(t, sa, idA, "#lobby", "@bob two")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@bob one")
+	say(t, sa, idA, "lobby", "@bob two")
 	if len(pendingFor(h, idB)) != 2 {
 		t.Fatal("setup: mentions did not queue")
 	}
@@ -325,7 +325,7 @@ func TestNotifyOffDiscardsWhatIsAlreadyWaiting(t *testing.T) {
 	// queue to model someone who opts out with mail still waiting.
 	sb, _, _ := connectKeyed(t, h, 0xB2, "bob")
 	h.mu.Lock()
-	h.peers[hex.EncodeToString(idB)].Mentions = []peerreg.Mention{{Room: "#lobby", Text: "still here"}}
+	h.peers[hex.EncodeToString(idB)].Mentions = []peerreg.Mention{{Room: "lobby", Text: "still here"}}
 	h.mu.Unlock()
 
 	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "", "/notify off")))
@@ -351,8 +351,8 @@ func TestThePeerDirectorySurvivesARestart(t *testing.T) {
 	h1 := quietHubCfg(cfg)
 	idB := visitAndLeave(t, h1, 0xB2, "bob")
 	sa, _, idA := connectKeyed(t, h1, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@bob catch you later")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@bob catch you later")
 	h1.Stop()
 
 	h2 := quietHubCfg(cfg)
@@ -360,8 +360,8 @@ func TestThePeerDirectorySurvivesARestart(t *testing.T) {
 	if len(held) != 1 {
 		t.Fatalf("after restart the hub holds %d mentions, want 1", len(held))
 	}
-	if held[0].Room != "#lobby" {
-		t.Errorf("restored mention room = %q, want #lobby", held[0].Room)
+	if held[0].Room != "lobby" {
+		t.Errorf("restored mention room = %q, want lobby", held[0].Room)
 	}
 
 	// And the restored key must still address the same identity.
@@ -410,8 +410,8 @@ func TestMentionsOffChangesNothing(t *testing.T) {
 	h := quietHub()
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
 	_, _, idB := connectKeyed(t, h, 0xB2, "bob")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@bob hello")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@bob hello")
 
 	if got := pendingFor(h, idB); len(got) != 0 {
 		t.Errorf("a hub with mentions disabled queued %d notifications", len(got))
@@ -459,8 +459,8 @@ func TestAHexShapedNickIsStillMentionable(t *testing.T) {
 			visitAndLeave(t, h, seed, nick)
 
 			sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-			join(t, sa, idA, "#lobby", "")
-			say(t, sa, idA, "#lobby", "@"+nick+" are you there")
+			join(t, sa, idA, "lobby", "")
+			say(t, sa, idA, "lobby", "@"+nick+" are you there")
 			sa.Close()
 
 			if got := len(pendingFor(h, id)); got != 1 {
@@ -490,13 +490,13 @@ func TestAMentionSurvivesAPeerWhoLeftBeforeTheHubNoticed(t *testing.T) {
 	})
 
 	walden, _, waldenID := connectKeyed(t, h, 0xB2, "Walden")
-	join(t, walden, waldenID, "#lobby", "")
+	join(t, walden, waldenID, "lobby", "")
 
 	other, _, otherID := connectKeyed(t, h, 0xA1, "someone")
-	join(t, other, otherID, "#lobby", "")
+	join(t, other, otherID, "lobby", "")
 
 	// Walden's client goes away. Nothing tells the hub: no part, no
-	// close, just silence. They are still a member of #lobby.
+	// close, just silence. They are still a member of lobby.
 	walden.mu.Lock()
 	walden.lastAliveMs = h.now() - (49 * time.Second).Milliseconds()
 	walden.mu.Unlock()
@@ -512,7 +512,7 @@ func TestAMentionSurvivesAPeerWhoLeftBeforeTheHubNoticed(t *testing.T) {
 		t.Fatal("setup: Walden must still look like a room member")
 	}
 
-	say(t, other, otherID, "#lobby", "@Walden check this")
+	say(t, other, otherID, "lobby", "@Walden check this")
 
 	pending := pendingFor(h, waldenID)
 	if len(pending) != 1 {
@@ -534,12 +534,12 @@ func TestAMentionForSomeoneDemonstrablyPresentIsNotQueued(t *testing.T) {
 	})
 
 	walden, _, waldenID := connectKeyed(t, h, 0xB2, "Walden")
-	join(t, walden, waldenID, "#lobby", "")
+	join(t, walden, waldenID, "lobby", "")
 	other, _, otherID := connectKeyed(t, h, 0xA1, "someone")
-	join(t, other, otherID, "#lobby", "")
+	join(t, other, otherID, "lobby", "")
 
 	// join() was inbound traffic, so Walden was heard from just now.
-	say(t, other, otherID, "#lobby", "@Walden check this")
+	say(t, other, otherID, "lobby", "@Walden check this")
 
 	if n := len(pendingFor(h, waldenID)); n != 0 {
 		t.Errorf("queued %d mentions for a peer sitting in the room, want 0", n)
@@ -553,15 +553,15 @@ func TestAMentionForSomeoneDemonstrablyPresentIsNotQueued(t *testing.T) {
 func TestWithoutKeepaliveTheOldPresenceRuleStands(t *testing.T) {
 	h := mentionHub(t, nil) // ping_interval unset
 	walden, _, waldenID := connectKeyed(t, h, 0xB2, "Walden")
-	join(t, walden, waldenID, "#lobby", "")
+	join(t, walden, waldenID, "lobby", "")
 	other, _, otherID := connectKeyed(t, h, 0xA1, "someone")
-	join(t, other, otherID, "#lobby", "")
+	join(t, other, otherID, "lobby", "")
 
 	walden.mu.Lock()
 	walden.lastAliveMs = h.now() - (10 * time.Minute).Milliseconds()
 	walden.mu.Unlock()
 
-	say(t, other, otherID, "#lobby", "@Walden check this")
+	say(t, other, otherID, "lobby", "@Walden check this")
 
 	if n := len(pendingFor(h, waldenID)); n != 0 {
 		t.Errorf("queued %d mentions with no keepalive to judge presence by, want 0", n)

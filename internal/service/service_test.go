@@ -2,9 +2,13 @@ package service
 
 import (
 	"bytes"
+	"io"
+	"log"
 	"testing"
 
 	"github.com/thatSFguy/reticulum-go/rns"
+	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
+	"github.com/thatSFguy/reticulum-relay-chat/internal/hub"
 )
 
 // The §6.7.6 frame layout is parsed and verified inside reticulum-go
@@ -64,4 +68,90 @@ func concat(parts ...[]byte) []byte {
 		out = append(out, p...)
 	}
 	return out
+}
+
+// --- link-closed reaping (reticulum-go v0.7.0 §6.7.3) -----------------
+
+// closeTestService builds the Service that onLinkClosed touches: a real
+// hub (so sessionFor can make a Session) and a real Transport (so
+// Session.Close can reach LinkManager through rnsLink).
+func closeTestService(t *testing.T) *Service {
+	t.Helper()
+	quiet := log.New(io.Discard, "", 0)
+	return &Service{
+		log:        quiet,
+		sessions:   make(map[string]*hub.Session),
+		identities: make(map[string]peerBinding),
+		hub:        hub.New(bytes.Repeat([]byte{0xFF}, rns.IdentityHashLen), config.HubConfig{}, quiet),
+		transport:  rns.NewTransport(quiet),
+	}
+}
+
+func sessionCount(s *Service) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.sessions)
+}
+
+// The 30-second janitor poll was not cosmetic: for that whole window
+// the hub answered "is this person here?" wrongly in the direction that
+// loses messages.
+func TestAnObservedLinkCloseReapsTheSessionImmediately(t *testing.T) {
+	svc := closeTestService(t)
+	linkID := bytes.Repeat([]byte{0x5A}, rns.IdentityHashLen)
+
+	if svc.sessionFor(linkID) == nil {
+		t.Fatal("no session created")
+	}
+	if got := sessionCount(svc); got != 1 {
+		t.Fatalf("session count = %d, want 1", got)
+	}
+
+	svc.onLinkClosed(linkID, rns.TeardownInitiatorClosed)
+
+	if got := sessionCount(svc); got != 0 {
+		t.Errorf("session count = %d after an observed close, want 0", got)
+	}
+}
+
+// A local close is our own doing and the teardown that decided on it is
+// already unwinding — rnsLink.Close calls CloseLink, which is what
+// fires this callback. Acting again would re-enter state the first pass
+// has not finished with.
+func TestALocalCloseDoesNotReenterTeardown(t *testing.T) {
+	svc := closeTestService(t)
+	linkID := bytes.Repeat([]byte{0x5B}, rns.IdentityHashLen)
+	svc.sessionFor(linkID)
+
+	svc.onLinkClosed(linkID, rns.TeardownLocalClosed)
+
+	if got := sessionCount(svc); got != 1 {
+		t.Errorf("session count = %d; a local close reaped the session from under its own teardown", got)
+	}
+}
+
+// The callback fires from more than one path and a retransmitted
+// LINKCLOSE is normal, so a second delivery must be inert.
+func TestReapingIsIdempotent(t *testing.T) {
+	svc := closeTestService(t)
+	linkID := bytes.Repeat([]byte{0x5C}, rns.IdentityHashLen)
+	svc.sessionFor(linkID)
+
+	svc.onLinkClosed(linkID, rns.TeardownInitiatorClosed)
+	svc.onLinkClosed(linkID, rns.TeardownInitiatorClosed)
+	svc.onLinkClosed(linkID, rns.TeardownTimeout)
+
+	if got := sessionCount(svc); got != 0 {
+		t.Errorf("session count = %d, want 0", got)
+	}
+}
+
+// A close for a link this service never had a session for is normal on
+// a hub whose transport also carries LXMF links.
+func TestAClosedLinkWeNeverSawIsIgnored(t *testing.T) {
+	svc := closeTestService(t)
+	svc.onLinkClosed(bytes.Repeat([]byte{0x5D}, rns.IdentityHashLen), rns.TeardownTimeout)
+	if got := sessionCount(svc); got != 0 {
+		t.Errorf("session count = %d, want 0", got)
+	}
 }

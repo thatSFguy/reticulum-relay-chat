@@ -88,6 +88,76 @@ type PeerAddressPinner interface {
 	PinPeers(pubKeys [][]byte)
 }
 
+// NotifyRoute is what the installed notifier can say about its route to
+// one peer. It exists for /notify and /whoami: the hub's own logs record
+// why a notification failed, and the person it failed to reach cannot
+// read them.
+type NotifyRoute struct {
+	// Address is where a notification would be sent, rendered so a
+	// person can compare it against what their own messaging client
+	// shows them. That comparison is the whole point — the commonest
+	// cause of "notifications do not work" is a client whose messaging
+	// identity is not the identity it connects to RRC with, and nothing
+	// on either side says so.
+	Address string
+	// Announced reports whether the hub has heard this peer announce.
+	// Until it has, the hub does not know their §5.7.4 stamp_cost, and
+	// an unstamped message is discarded in silence by a client that
+	// enforces one.
+	Announced bool
+	// Notes are further human-readable observations, e.g. how many
+	// store-and-forward nodes are usable.
+	Notes []string
+}
+
+// DirectNotifier is an optional OfflineNotifier capability: deliver over
+// the route that yields end-to-end proof, and do not fall back to
+// store-and-forward.
+//
+// It exists for /notify test, where the two routes are not
+// interchangeable. A direct send blocks for the recipient's own §6.5
+// delivery proof, so it answers the question the user actually asked —
+// "can this hub reach me?" — in about ten seconds. The fallback answers
+// nothing: a node acknowledges storage, never receipt, so its result is
+// ErrDeliveredUnconfirmed by construction. Worse, it is SLOW: a node
+// whose LRPROOF times out costs 20 seconds each, and a test that takes
+// 45 seconds to produce an unconfirmable answer produces it into a link
+// the user has already closed. That is not a diagnostic, it is silence
+// with extra steps — and it is what this command did before.
+type DirectNotifier interface {
+	NotifyDirect(pubKey []byte, title, body string) error
+}
+
+// NotifyDiagnoser is an optional OfflineNotifier capability: it explains
+// how it would reach a peer, without sending anything.
+//
+// Optional, and behind an interface, because the hub is deliberately
+// transport-agnostic: it must not learn how to derive an LXMF address
+// in order to print one.
+type NotifyDiagnoser interface {
+	DiagnoseRoute(pubKey []byte) NotifyRoute
+}
+
+// notifyRoute asks the installed notifier to describe its route to a
+// peer. ok is false when no notifier is installed, or when the one that
+// is cannot answer.
+func (h *Hub) notifyRoute(pubKey []byte) (NotifyRoute, bool) {
+	h.mu.Lock()
+	d, _ := h.notifier.(NotifyDiagnoser)
+	h.mu.Unlock()
+	if d == nil || len(pubKey) == 0 {
+		return NotifyRoute{}, false
+	}
+	return d.DiagnoseRoute(pubKey), true
+}
+
+// offlineNotifier returns the installed notifier, or nil.
+func (h *Hub) offlineNotifier() OfflineNotifier {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.notifier
+}
+
 // SetOfflineNotifier installs the notifier. Call before Start.
 func (h *Hub) SetOfflineNotifier(n OfflineNotifier) {
 	h.mu.Lock()
@@ -158,15 +228,17 @@ func (h *Hub) pushPendingMentions() {
 			continue
 		}
 		// Still connected: they will be told over RRC, and an LXMF copy
-		// would arrive alongside it.
-		if h.sessionForHashLocked(idHex) != nil {
+		// would arrive alongside it. Unless they have said /away — in
+		// which case the RRC copy is going to a screen nobody is
+		// looking at, which is precisely what they told us.
+		if sess := h.sessionForHashLocked(idHex); sess != nil && !sess.isAway() {
 			continue
 		}
 		if last, ok := h.lastPush[idHex]; ok && now.Sub(last) < mentionPushInterval {
 			continue
 		}
 		h.lastPush[idHex] = now
-		title, body := renderMentionNotification(h.cfg.Name, p.Mentions)
+		title, body := h.renderMentionNotificationLocked(p.Mentions)
 		batch = append(batch, pendingPush{
 			idHex:   idHex,
 			pubKey:  append([]byte(nil), p.PublicKey...),
@@ -249,17 +321,42 @@ func (h *Hub) sweepLastPushLocked(now time.Time) {
 // renderMentionNotification turns pending mentions into the message an
 // LXMF client will show.
 //
-// It has to stand on its own: it lands in a general-purpose messaging
-// app next to unrelated conversations, so it says which hub it came
-// from and quotes enough to be worth acting on.
-func renderMentionNotification(hubName string, mentions []peerreg.Mention) (title, body string) {
+// It has to stand on its own. This does not arrive in a chat window
+// next to the conversation it is about — it arrives in a general
+// messaging app, between a delivery notice and somebody's unrelated
+// reply, possibly hours later. Whoever reads it needs to know, without
+// opening anything: which hub, WHICH ROOM, who said it, and how to get
+// back.
+//
+// The room is given with its display "#" because that is how it reads
+// as a place rather than a word, and it is repeated per line rather
+// than stated once, since several mentions may come from several rooms.
+//
+// There is no link to give. RRC defines no URI scheme — nothing in the
+// spec, and no client implements one — so a tappable "open #lobby"
+// cannot be produced without inventing a format no deployed client
+// would honour, which is exactly what this project does not do. The
+// closest honest thing is the hub's destination hash, which is what a
+// client actually needs to reach it, so that is what the footer gives.
+// Caller must hold h.mu: it reads hub config and the destination hash,
+// and its only caller renders inside the batch it is building.
+func (h *Hub) renderMentionNotificationLocked(mentions []peerreg.Mention) (title, body string) {
+	hubName := h.cfg.Name
 	if hubName == "" {
 		hubName = "RRC hub"
 	}
-	if len(mentions) == 1 {
-		title = fmt.Sprintf("%s: mentioned in %s", hubName, mentions[0].Room)
-	} else {
-		title = fmt.Sprintf("%s: %d mentions", hubName, len(mentions))
+
+	rooms := distinctRooms(mentions)
+	switch {
+	case len(mentions) == 1:
+		title = fmt.Sprintf("%s: mentioned in #%s", hubName, mentions[0].Room)
+	case len(rooms) == 1:
+		title = fmt.Sprintf("%s: %d mentions in #%s", hubName, len(mentions), rooms[0])
+	default:
+		// Naming the rooms beats a bare count: it is the difference
+		// between "something happened" and "the thing you care about
+		// happened in #ops".
+		title = fmt.Sprintf("%s: %d mentions in %s", hubName, len(mentions), hashJoin(rooms, 3))
 	}
 
 	var b strings.Builder
@@ -267,9 +364,67 @@ func renderMentionNotification(hubName string, mentions []peerreg.Mention) (titl
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		fmt.Fprintf(&b, "%s in %s by %s:\n%s\n",
+		fmt.Fprintf(&b, "#%s · %s · %s\n%s\n",
+			m.Room,
 			humanAgo(time.Since(time.Unix(int64(m.TS), 0))),
-			m.Room, mentionAuthor(m.ByNick, m.ByHex), m.Text)
+			mentionAuthor(m.ByNick, m.ByHex), m.Text)
 	}
+
+	// How to act on it. Without this the reader knows they were named
+	// and has nothing to do about it.
+	b.WriteString("\n—\n")
+	// A link, not a bare hash. See rrclink.go: this is the NomadNet
+	// target syntax (SPEC §11.6.3), so it is a thing the ecosystem
+	// already knows how to read, and inert text to anything that does
+	// not.
+	switch {
+	case len(rooms) == 1 && h.roomLinkLocked(rooms[0]) != "":
+		fmt.Fprintf(&b, "To reply, join #%s on %s:\n%s\n",
+			rooms[0], hubName, h.roomLinkLocked(rooms[0]))
+	case len(rooms) > 1 && h.hubLinkLocked() != "":
+		fmt.Fprintf(&b, "To reply, rejoin the room on %s:\n", hubName)
+		for _, r := range rooms {
+			fmt.Fprintf(&b, "%s\n", h.roomLinkLocked(r))
+		}
+	case len(rooms) == 1:
+		fmt.Fprintf(&b, "To reply, join #%s on %s.\n", rooms[0], hubName)
+	default:
+		fmt.Fprintf(&b, "To reply, rejoin the room on %s.\n", hubName)
+	}
+	b.WriteString("Sent because you were named there. /notify off on the hub stops these.")
 	return title, b.String()
+}
+
+// distinctRooms lists the rooms a batch of mentions came from, in first
+// appearance order.
+func distinctRooms(mentions []peerreg.Mention) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range mentions {
+		if m.Room == "" || seen[m.Room] {
+			continue
+		}
+		seen[m.Room] = true
+		out = append(out, m.Room)
+	}
+	return out
+}
+
+// hashJoin renders up to max room names with their display sigil.
+func hashJoin(rooms []string, max int) string {
+	shown := rooms
+	extra := 0
+	if len(shown) > max {
+		extra = len(shown) - max
+		shown = shown[:max]
+	}
+	parts := make([]string, len(shown))
+	for i, r := range shown {
+		parts[i] = "#" + r
+	}
+	joined := strings.Join(parts, ", ")
+	if extra > 0 {
+		joined += fmt.Sprintf(" and %d more", extra)
+	}
+	return joined
 }

@@ -13,6 +13,15 @@ hub_identity
 /rrc-hub.toml
 *.log
 
+# Runtime state a running hub writes beside itself, at the default paths
+# in rrc-hub.example.toml. peers.toml is the one that matters: it holds
+# real users' public keys, nicknames and any mentions still waiting for
+# them, and it appears the first time anybody connects.
+/peers.toml
+/rooms.toml
+/klines.txt
+/history/
+
 # Agent / AI config files — local to the developer, not pushed.
 AGENTS.md
 AGENT.md

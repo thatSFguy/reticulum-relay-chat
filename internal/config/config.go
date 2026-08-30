@@ -110,6 +110,16 @@ type HubConfig struct {
 	// Mentions — telling someone they were named while they were not
 	// looking. Independent of history: a hub can notify without
 	// retaining, or retain without notifying.
+	// UniqueNicks makes the hub GRANT a nickname rather than accept
+	// one: the first identity to claim a name keeps it, and a later
+	// claimant becomes sam1, sam2, and so on.
+	//
+	// On by default, because the alternative is not "names are
+	// flexible" but "@mentions silently reach nobody" — resolution
+	// declines rather than guess between two people answering to the
+	// same name, and says nothing about having declined.
+	UniqueNicks bool `toml:"unique_nicks"`
+
 	MentionNotify       bool   `toml:"mention_notify"`
 	PeerRegistryPath    string `toml:"peer_registry_path"`
 	MaxKnownPeers       int    `toml:"max_known_peers"`
@@ -182,7 +192,7 @@ func (d Duration) MarshalText() ([]byte, error) {
 func defaults() Config {
 	return Config{
 		Hub: HubConfig{
-			Name:    "RRC Hub",
+			Name:    "thatSFguy",
 			Version: DefaultVersion,
 			// Says what this hub is, because it is not what a client
 			// connecting to it will assume. Everything named here is
@@ -243,6 +253,7 @@ func defaults() Config {
 			HistoryReplayBytes:             2048,
 			HistoryPullCount:               100,
 			HistoryPullBytes:               16384,
+			UniqueNicks:                    true,
 			MentionNotify:                  false,
 			PeerRegistryPath:               "peers.toml",
 			MaxKnownPeers:                  2048,

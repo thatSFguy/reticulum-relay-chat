@@ -95,13 +95,13 @@ func TestAJoinerIsReplayedWhatTheyMissed(t *testing.T) {
 	// The room must outlive A's visit, or its history goes with it —
 	// so register it, which is what "this room is a place" means here.
 	sa, _ := connect(t, h, idA)
-	join(t, sa, idA, "#lobby", "")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
-	say(t, sa, idA, "#lobby", "first")
-	say(t, sa, idA, "#lobby", "second")
+	join(t, sa, idA, "lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/register lobby")))
+	say(t, sa, idA, "lobby", "first")
+	say(t, sa, idA, "lobby", "second")
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
+	join(t, sb, idB, "lobby", "")
 
 	got := replayedBodies(t, linkB)
 	if want := []string{"first", "second"}; !equalStrings(got, want) {
@@ -117,12 +117,12 @@ func TestAReplayIsBracketedByNotices(t *testing.T) {
 	idB := bytes.Repeat([]byte{0xB2}, 16)
 
 	sa, _ := connect(t, h, idA)
-	join(t, sa, idA, "#lobby", "")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
-	say(t, sa, idA, "#lobby", "hello")
+	join(t, sa, idA, "lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/register lobby")))
+	say(t, sa, idA, "lobby", "hello")
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
+	join(t, sb, idB, "lobby", "")
 
 	notices := noticesOn(t, linkB)
 	if !hasPrefixIn(notices, "--- 1 message") {
@@ -142,10 +142,10 @@ func TestAReplayPreservesTheOriginalIdAndTimestamp(t *testing.T) {
 	idB := bytes.Repeat([]byte{0xB2}, 16)
 
 	sa, linkA := connect(t, h, idA)
-	join(t, sa, idA, "#lobby", "")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
+	join(t, sa, idA, "lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/register lobby")))
 
-	sent := clientEnvelope(rrc.TMsg, idA, "#lobby", "remember me")
+	sent := clientEnvelope(rrc.TMsg, idA, "lobby", "remember me")
 	sent.TimestampMs = 1_700_000_000_123
 	sa.OnInbound(encode(t, sent))
 
@@ -155,7 +155,7 @@ func TestAReplayPreservesTheOriginalIdAndTimestamp(t *testing.T) {
 	}
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
+	join(t, sb, idB, "lobby", "")
 
 	replayed, ok := lastTypeBody(t, linkB, rrc.TMsg)
 	if !ok {
@@ -182,12 +182,12 @@ func TestTheTranscriptKeepsTheVerifiedSenderNotTheClaimedOne(t *testing.T) {
 	spoofed := bytes.Repeat([]byte{0xEE}, 16)
 
 	sa, _ := connect(t, h, idA)
-	join(t, sa, idA, "#lobby", "")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, spoofed, "#lobby", "it was not me")))
+	join(t, sa, idA, "lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/register lobby")))
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, spoofed, "lobby", "it was not me")))
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
+	join(t, sb, idB, "lobby", "")
 
 	replayed, ok := lastTypeBody(t, linkB, rrc.TMsg)
 	if !ok {
@@ -229,13 +229,13 @@ func TestARegisteredRoomsHistorySurvivesGoingEmpty(t *testing.T) {
 	idB := bytes.Repeat([]byte{0xB2}, 16)
 
 	sa, _ := connect(t, h, idA)
-	join(t, sa, idA, "#lobby", "")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
-	say(t, sa, idA, "#lobby", "still here tomorrow")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TPart, idA, "#lobby", nil)))
+	join(t, sa, idA, "lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/register lobby")))
+	say(t, sa, idA, "lobby", "still here tomorrow")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TPart, idA, "lobby", nil)))
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
+	join(t, sb, idB, "lobby", "")
 
 	if got := replayedBodies(t, linkB); !equalStrings(got, []string{"still here tomorrow"}) {
 		t.Errorf("registered room replayed %v, want the retained message", got)
@@ -250,14 +250,14 @@ func TestTheJoinReplayIsBoundedByTheConfiguredCount(t *testing.T) {
 	idB := bytes.Repeat([]byte{0xB2}, 16)
 
 	sa, _ := connect(t, h, idA)
-	join(t, sa, idA, "#lobby", "")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
+	join(t, sa, idA, "lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/register lobby")))
 	for _, text := range []string{"one", "two", "three", "four"} {
-		say(t, sa, idA, "#lobby", text)
+		say(t, sa, idA, "lobby", text)
 	}
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
+	join(t, sb, idB, "lobby", "")
 
 	if got := replayedBodies(t, linkB); !equalStrings(got, []string{"three", "four"}) {
 		t.Errorf("join replay was %v, want the last two", got)
@@ -270,19 +270,19 @@ func TestHistoryCommandServesMoreThanTheJoinReplay(t *testing.T) {
 	idB := bytes.Repeat([]byte{0xB2}, 16)
 
 	sa, _ := connect(t, h, idA)
-	join(t, sa, idA, "#lobby", "")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
+	join(t, sa, idA, "lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/register lobby")))
 	for _, text := range []string{"one", "two", "three"} {
-		say(t, sa, idA, "#lobby", text)
+		say(t, sa, idA, "lobby", text)
 	}
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
+	join(t, sb, idB, "lobby", "")
 	if got := replayedBodies(t, linkB); len(got) != 1 {
 		t.Fatalf("join replay was %v, want one message", got)
 	}
 
-	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "#lobby", "/history #lobby 10")))
+	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "lobby", "/history lobby 10")))
 
 	got := replayedBodies(t, linkB)
 	if len(got) < 4 {
@@ -319,22 +319,22 @@ func TestHistoryPurgeRequiresARoomOperator(t *testing.T) {
 	idB := bytes.Repeat([]byte{0xB2}, 16)
 
 	sa, _ := connect(t, h, idA) // founder, therefore op
-	join(t, sa, idA, "#lobby", "")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
-	say(t, sa, idA, "#lobby", "delete me")
+	join(t, sa, idA, "lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/register lobby")))
+	say(t, sa, idA, "lobby", "delete me")
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
-	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "#lobby", "/history purge #lobby")))
+	join(t, sb, idB, "lobby", "")
+	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "lobby", "/history purge lobby")))
 	if !strings.Contains(lastError(t, linkB), "not authorized") {
 		t.Errorf("a non-op purge was not refused: %q", lastError(t, linkB))
 	}
 
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/history purge #lobby")))
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/history purge lobby")))
 
 	idC := bytes.Repeat([]byte{0xC3}, 16)
 	sc, linkC := connect(t, h, idC)
-	join(t, sc, idC, "#lobby", "")
+	join(t, sc, idC, "lobby", "")
 	if got := replayedBodies(t, linkC); len(got) != 0 {
 		t.Errorf("history survived a purge: %v", got)
 	}
@@ -348,16 +348,16 @@ func TestHistoryOffChangesNothing(t *testing.T) {
 	idB := bytes.Repeat([]byte{0xB2}, 16)
 
 	sa, _ := connect(t, h, idA)
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "into the void")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "into the void")
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
+	join(t, sb, idB, "lobby", "")
 	if got := replayedBodies(t, linkB); len(got) != 0 {
 		t.Errorf("a hub with history disabled replayed %v", got)
 	}
 
-	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "#lobby", "/history")))
+	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "lobby", "/history")))
 	if !strings.Contains(lastNotice(t, linkB), "does not retain history") {
 		t.Errorf("expected a clear answer, got %q", lastNotice(t, linkB))
 	}
@@ -372,13 +372,13 @@ func TestCommandsAreNotRetained(t *testing.T) {
 	idB := bytes.Repeat([]byte{0xB2}, 16)
 
 	sa, _ := connect(t, h, idA)
-	join(t, sa, idA, "#lobby", "")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/topic #lobby hello")))
-	say(t, sa, idA, "#lobby", "real message")
+	join(t, sa, idA, "lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/register lobby")))
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/topic lobby hello")))
+	say(t, sa, idA, "lobby", "real message")
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
+	join(t, sb, idB, "lobby", "")
 
 	for _, body := range replayedBodies(t, linkB) {
 		if strings.HasPrefix(body, "/") {
@@ -408,16 +408,16 @@ func TestHistoryPullIsThrottled(t *testing.T) {
 	idB := bytes.Repeat([]byte{0xB2}, 16)
 
 	sa, _ := connect(t, h, idA)
-	join(t, sa, idA, "#lobby", "")
-	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "#lobby", "/register #lobby")))
-	say(t, sa, idA, "#lobby", "something worth pulling")
+	join(t, sa, idA, "lobby", "")
+	sa.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idA, "lobby", "/register lobby")))
+	say(t, sa, idA, "lobby", "something worth pulling")
 
 	sb, linkB := connect(t, h, idB)
-	join(t, sb, idB, "#lobby", "")
+	join(t, sb, idB, "lobby", "")
 
-	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "#lobby", "/history #lobby 10")))
+	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "lobby", "/history lobby 10")))
 	before := len(replayedBodies(t, linkB))
-	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "#lobby", "/history #lobby 10")))
+	sb.OnInbound(encode(t, clientEnvelope(rrc.TMsg, idB, "lobby", "/history lobby 10")))
 
 	if got := len(replayedBodies(t, linkB)); got != before {
 		t.Errorf("the second /history replayed %d more message(s), want it throttled", got-before)

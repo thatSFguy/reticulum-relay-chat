@@ -62,8 +62,8 @@ func queueMentionFor(t *testing.T, h *Hub, text string) (id, pubKey []byte) {
 	visitAndLeave(t, h, 0xB2, "bob")
 
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@bob "+text)
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@bob "+text)
 
 	if len(pendingFor(h, id)) != 1 {
 		t.Fatalf("setup: the mention did not queue")
@@ -88,7 +88,7 @@ func TestAWaitingMentionIsPushedToTheNotifier(t *testing.T) {
 	if !equalBytesHelper(sent[0].pubKey, pubKey) {
 		t.Errorf("addressed to key %x, want the peer's %x", sent[0].pubKey, pubKey)
 	}
-	if !strings.Contains(sent[0].title, "#lobby") {
+	if !strings.Contains(sent[0].title, "lobby") {
 		t.Errorf("title %q does not say where it came from", sent[0].title)
 	}
 	if !strings.Contains(sent[0].body, "are you there?") || !strings.Contains(sent[0].body, "alice") {
@@ -188,9 +188,9 @@ func TestMultipleWaitingMentionsBecomeOneNotification(t *testing.T) {
 
 	visitAndLeave(t, h, 0xB2, "bob")
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
+	join(t, sa, idA, "lobby", "")
 	for _, text := range []string{"first", "second", "third"} {
-		say(t, sa, idA, "#lobby", "@bob "+text)
+		say(t, sa, idA, "lobby", "@bob "+text)
 	}
 
 	h.pushPendingMentions()
@@ -217,15 +217,15 @@ func TestAMentionArrivingDuringAPushIsNotLost(t *testing.T) {
 	var idA []byte
 	n := &notifierHook{onNotify: func() {
 		// Racing the upload: a second mention lands mid-flight.
-		say(t, sa, idA, "#lobby", "@bob second")
+		say(t, sa, idA, "lobby", "@bob second")
 	}}
 	h.SetOfflineNotifier(n)
 
 	_, id := keyFor(0xB2)
 	visitAndLeave(t, h, 0xB2, "bob")
 	sa, _, idA = connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@bob first")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@bob first")
 
 	h.pushPendingMentions()
 
@@ -258,8 +258,8 @@ func TestNothingIsPushedWhenMentionsAreOff(t *testing.T) {
 	h.SetOfflineNotifier(n)
 
 	sa, _, idA := connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
-	say(t, sa, idA, "#lobby", "@bob hello")
+	join(t, sa, idA, "lobby", "")
+	say(t, sa, idA, "lobby", "@bob hello")
 	h.pushPendingMentions()
 
 	if n.attempts() != 0 {
@@ -310,16 +310,16 @@ func TestAFullQueueDoesNotLoseMentionsArrivingDuringAPush(t *testing.T) {
 	n := &notifierHook{onNotify: func() {
 		// Overflows the queue: "one" is evicted to make room, so the
 		// three that were sent are no longer at the front.
-		say(t, sa, idA, "#lobby", "@bob four")
+		say(t, sa, idA, "lobby", "@bob four")
 	}}
 	h.SetOfflineNotifier(n)
 
 	_, id := keyFor(0xB2)
 	visitAndLeave(t, h, 0xB2, "bob")
 	sa, _, idA = connectKeyed(t, h, 0xA1, "alice")
-	join(t, sa, idA, "#lobby", "")
+	join(t, sa, idA, "lobby", "")
 	for _, word := range []string{"one", "two", "three"} {
-		say(t, sa, idA, "#lobby", "@bob "+word)
+		say(t, sa, idA, "lobby", "@bob "+word)
 	}
 	if got := len(pendingFor(h, id)); got != 3 {
 		t.Fatalf("setup: %d mentions queued, want the queue full at 3", got)

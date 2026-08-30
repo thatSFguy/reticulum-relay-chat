@@ -14,11 +14,20 @@ func TestValidRoomRejectsInvalidUTF8(t *testing.T) {
 	h := quietHub()
 	s := &Session{hub: h}
 
-	if err := s.validRoom(string([]byte{0xff, 0xfe})); err == nil {
+	if _, err := s.validRoom(string([]byte{0xff, 0xfe})); err == nil {
 		t.Error("validRoom must reject an invalid-UTF-8 room name (audit A7)")
 	}
-	if err := s.validRoom("lobby"); err != nil {
-		t.Errorf("validRoom rejected a valid room name: %v", err)
+	if got, err := s.validRoom("lobby"); err != nil || got != "lobby" {
+		t.Errorf("validRoom(\"lobby\") = %q, %v; want \"lobby\", nil", got, err)
+	}
+	// The display sigil is not part of the name: "#lobby" and "lobby"
+	// must be the same room, or a client that passes the typed "#" on
+	// creates a second room rendered "##lobby".
+	if got, err := s.validRoom("#lobby"); err != nil || got != "lobby" {
+		t.Errorf("validRoom(\"#lobby\") = %q, %v; want \"lobby\", nil", got, err)
+	}
+	if _, err := s.validRoom("###"); err == nil {
+		t.Error("validRoom must reject a name that is only sigils")
 	}
 }
 
