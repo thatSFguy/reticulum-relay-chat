@@ -46,3 +46,39 @@ func TestLXMFNameHandlesAnUnnamedHub(t *testing.T) {
 		t.Errorf("LXMFName() = %q for an unnamed hub", got)
 	}
 }
+
+// --- mention defaults --------------------------------------------------
+
+// Both were off, which meant "@nick" silently did nothing on every hub
+// whose operator had not read the config closely enough to find them.
+// A feature nobody can discover is a feature nobody has.
+func TestMentionsAreOnByDefault(t *testing.T) {
+	d := DefaultsForTest()
+	if !d.MentionNotify {
+		t.Error("mention_notify defaults off; @nick does nothing on an untuned hub")
+	}
+	if !d.MentionLXMF {
+		t.Error("mention_lxmf defaults off; a mention is held but nothing tells the person to look")
+	}
+}
+
+// The directory is what makes an absent peer addressable, so a hub that
+// notifies must have somewhere to keep it.
+func TestTheMentionDefaultsAreInternallyConsistent(t *testing.T) {
+	d := DefaultsForTest()
+	if d.MentionNotify && d.PeerRegistryPath == "" {
+		t.Error("mention_notify is on but there is nowhere to persist the peer directory")
+	}
+	if d.MentionLXMF && !d.MentionNotify {
+		t.Error("mention_lxmf is on without mention_notify, which does nothing")
+	}
+	// Keepalive is what lets the hub tell present from absent. With it
+	// at zero, mention_notify is inert — the reason those defaults
+	// changed in v0.2.0.
+	if d.MentionNotify && (d.PingInterval.Duration <= 0 || d.PingTimeout.Duration <= 0) {
+		t.Error("mention_notify is on while keepalive is disabled; the hub cannot tell who left")
+	}
+	if d.MentionLXMF && d.LXMFName() == "" {
+		t.Error("the hub would announce an lxmf.delivery destination with no name")
+	}
+}

@@ -83,7 +83,19 @@ as a conversation in progress rather than a blank screen. `/history` asks
 for more.
 
 Retaining plaintext conversation on disk is the operator's decision, so
-it is off by default.
+it is off by default. Mentions are not: `mention_notify` and
+`mention_lxmf` both default **on**, because off meant `@nick` silently
+did nothing on every hub whose operator had not read the config closely
+enough to find them.
+
+Two consequences of that default, both deliberate. The hub retains a
+directory of identities it has met (`peers.toml`) — that record is what
+makes somebody addressable once their link is gone, and nothing can
+notify an absent peer without it. And it announces its own
+`lxmf.delivery` destination, so every messaging client on the mesh
+lists it; a recipient who has never heard that announce holds no key to
+verify a notification against and drops it in silence. Set either flag
+to `false` to opt out.
 
 ### Commands that answer for the hub
 

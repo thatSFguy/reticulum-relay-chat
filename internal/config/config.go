@@ -121,15 +121,42 @@ type HubConfig struct {
 	// same name, and says nothing about having declined.
 	UniqueNicks bool `toml:"unique_nicks"`
 
+	// MentionNotify turns on mention detection and the peer directory
+	// that makes it work.
+	//
+	// On by default. It was off, on the reasoning that a hub should not
+	// start keeping a record of who has visited without being asked —
+	// but the effect of that default was that the hub's most useful
+	// feature was invisible until an operator read the config closely
+	// enough to find it, and "@nick" silently did nothing on every hub
+	// nobody had tuned.
+	//
+	// Be aware of what it turns on: the hub begins retaining a
+	// directory of identities it has met — public key, last nickname,
+	// last seen — at PeerRegistryPath. That is what makes somebody
+	// addressable after their link is gone, and there is no way to
+	// notify an absent peer without it. Set false to keep no such
+	// record.
 	MentionNotify       bool   `toml:"mention_notify"`
 	PeerRegistryPath    string `toml:"peer_registry_path"`
 	MaxKnownPeers       int    `toml:"max_known_peers"`
 	MaxPendingMentions  int    `toml:"max_pending_mentions"`
 	MentionSnippetBytes int    `toml:"mention_snippet_bytes"`
-	// MentionLXMF hands a waiting mention to an LXMF propagation node,
-	// where the recipient's own client collects it — the only way to
-	// reach someone whose RRC link is gone. Without it a mention still
-	// waits, but nothing tells them to come and look.
+	// MentionLXMF delivers a waiting mention over LXMF — directly when
+	// the recipient answers, and otherwise into store-and-forward for
+	// their client to collect. It is the only way to reach somebody
+	// whose RRC link is gone. Without it a mention still waits, but
+	// nothing tells them to come and look, which is the difference
+	// between a feature and a footnote.
+	//
+	// On by default, with a consequence worth knowing: the hub then
+	// ANNOUNCES an lxmf.delivery destination. It has to — a recipient
+	// who has never heard that announce holds no public key to verify
+	// the signature against and drops every notification in silence
+	// (see the incident registry). Every messaging client on the mesh
+	// will therefore list the hub as a contact. It announces under
+	// LXMFName() rather than the hub's own name, and answers anyone
+	// who messages it, so it does not masquerade as a person.
 	MentionLXMF bool `toml:"mention_lxmf"`
 	// LXMFDisplayName is the name the hub's lxmf.delivery destination
 	// announces under. Empty derives one from Name.
@@ -265,13 +292,13 @@ func defaults() Config {
 			HistoryPullCount:               100,
 			HistoryPullBytes:               16384,
 			UniqueNicks:                    true,
-			MentionNotify:                  false,
+			MentionNotify:                  true,
 			PeerRegistryPath:               "peers.toml",
 			MaxKnownPeers:                  2048,
 			MaxPendingMentions:             20,
 			MentionSnippetBytes:            140,
 			DefaultRooms:                   []string{"lobby"},
-			MentionLXMF:                    false,
+			MentionLXMF:                    true,
 			LXMFPropagationFanout:          2,
 			Limits: LimitsConfig{
 				MaxNickBytes:        32,

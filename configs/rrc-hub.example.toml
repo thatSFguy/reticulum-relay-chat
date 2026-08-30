@@ -241,7 +241,18 @@ unique_nicks = true
 # Only announced at all when mention_notify and mention_lxmf are both on.
 #lxmf_display_name = ""
 
-mention_notify = false
+# Notice when somebody is named, and hold it for them. (default true)
+#
+# On by default. It was off, which meant "@nick" silently did nothing on
+# every hub whose operator had not read this far — the hub's most useful
+# feature, invisible.
+#
+# Know what it turns on: the hub starts retaining a directory of the
+# identities it has met — public key, last nickname, last seen — at
+# peer_registry_path below. That record is what makes somebody
+# addressable once their link is gone, and there is no way to notify an
+# absent peer without it. Set false to keep no such record.
+mention_notify = true
 
 # Where the peer directory lives: the identities this hub has met, their
 # public keys, their last nickname, and any mentions waiting for them.
@@ -281,8 +292,17 @@ mention_snippet_bytes = 140    # how much of the message a notification quotes (
 # confirms delivery the mention simply stays queued for their next RRC
 # session, so the worst case is seeing it twice.
 #
-# Requires mention_notify = true.
-mention_lxmf = false
+# Requires mention_notify = true. (default true)
+#
+# On by default, with a consequence worth understanding: the hub then
+# ANNOUNCES its own lxmf.delivery destination, and every messaging
+# client on the mesh will list it as a contact. That is not optional —
+# a recipient who has never heard that announce holds no public key to
+# verify the notification's signature against, and drops it in silence.
+# It announces as lxmf_display_name (above) rather than the hub's own
+# name, and answers anyone who messages it, so it does not pose as a
+# person. Set false if you would rather the hub announced only rrc.hub.
+mention_lxmf = true
 
 # Pin a propagation node by its lxmf.propagation destination hash (32
 # hex characters). Unset = auto-select.
