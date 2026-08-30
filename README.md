@@ -133,6 +133,24 @@ carry, which the hub adopts as the session nick. Enforcing only the
 first would be theatre. `unique_nicks = false` restores the old
 behaviour.
 
+### The notification address is not a person
+
+A hub that sends mention notifications **must** announce an
+`lxmf.delivery` destination — without it, recipients hold no public key
+to verify the signature against and drop every notification in silence.
+The cost is that messaging clients list that destination beside real
+contacts.
+
+So it announces under its own name: `<hub> — RRC notifications` by
+default, or whatever `lxmf_display_name` says. The hub used to appear
+twice under one name, once as a room to join and once as somebody to
+message; only the first was ever true.
+
+And it answers. Message that address and the hub replies once, saying
+the address only sends, and giving the link to join the hub properly.
+Before, that message went nowhere and the sender got silence — which
+looks exactly like a broken hub.
+
 ### Rooms you can link to
 
 "Come to #ops" is not directions: there are many hubs, room names are

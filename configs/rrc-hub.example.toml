@@ -228,6 +228,19 @@ history_pull_bytes = 16384               # (default 16384)
 # only.
 unique_nicks = true
 
+# The name the hub's lxmf.delivery destination announces under. Empty
+# derives "<name> — RRC notifications". (default "")
+#
+# It is deliberately NOT the hub name. The hub announces two
+# destinations: rrc.hub, a room to join, and lxmf.delivery, the address
+# it sends mention notifications FROM. A messaging client lists the
+# second beside real people, so under the same name the hub appears
+# twice and one of those entries is a lie — nobody reads replies there.
+# The hub answers anyone who messages it with a line saying so.
+#
+# Only announced at all when mention_notify and mention_lxmf are both on.
+#lxmf_display_name = ""
+
 mention_notify = false
 
 # Where the peer directory lives: the identities this hub has met, their

@@ -2,10 +2,14 @@ package service
 
 import (
 	"bytes"
+	"encoding/hex"
 	"io"
 	"log"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/thatSFguy/reticulum-go/lxmf"
 	"github.com/thatSFguy/reticulum-go/rns"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/hub"
@@ -153,5 +157,70 @@ func TestAClosedLinkWeNeverSawIsIgnored(t *testing.T) {
 	svc.onLinkClosed(bytes.Repeat([]byte{0x5D}, rns.IdentityHashLen), rns.TeardownTimeout)
 	if got := sessionCount(svc); got != 0 {
 		t.Errorf("session count = %d, want 0", got)
+	}
+}
+
+// --- the notifications-only address -----------------------------------
+
+// The hub must announce lxmf.delivery or nothing can verify its
+// notifications (CLAUDE.md §5). The cost is that every messaging client
+// lists it as a contact, so somebody will message it. Before this it
+// went nowhere and they got silence, which looks exactly like a broken
+// hub.
+func TestInboundIsThrottledPerSender(t *testing.T) {
+	svc := closeTestService(t)
+	svc.lastInboundReply = map[string]time.Time{}
+	src := bytes.Repeat([]byte{0x7A}, rns.IdentityHashLen)
+
+	// No notifier installed, so nothing is sent — what is under test is
+	// the throttle bookkeeping, which runs first.
+	svc.answerInboundLXMF(&lxmf.Message{SourceHash: src})
+	first := len(svc.lastInboundReply)
+	svc.answerInboundLXMF(&lxmf.Message{SourceHash: src})
+
+	if first != 1 {
+		t.Fatalf("after one inbound the throttle holds %d entries, want 1", first)
+	}
+	if got := len(svc.lastInboundReply); got != 1 {
+		t.Errorf("a repeat from the same sender added an entry (%d); the reply is itself "+
+			"an LXMF send, so an unthrottled one is a round trip somebody else drives", got)
+	}
+}
+
+// The throttle map is the one piece of per-sender state with no other
+// bound, so it must forget what can no longer suppress anything.
+func TestInboundThrottleIsSwept(t *testing.T) {
+	svc := closeTestService(t)
+	stale := bytes.Repeat([]byte{0x01}, rns.IdentityHashLen)
+	svc.lastInboundReply = map[string]time.Time{
+		hex.EncodeToString(stale): time.Now().Add(-2 * inboundReplyInterval),
+	}
+
+	svc.answerInboundLXMF(&lxmf.Message{SourceHash: bytes.Repeat([]byte{0x02}, rns.IdentityHashLen)})
+
+	if _, ok := svc.lastInboundReply[hex.EncodeToString(stale)]; ok {
+		t.Error("an expired throttle entry survived the sweep")
+	}
+}
+
+func TestInboundWithNoSenderIsIgnored(t *testing.T) {
+	svc := closeTestService(t)
+	svc.answerInboundLXMF(nil)
+	svc.answerInboundLXMF(&lxmf.Message{})
+	if len(svc.lastInboundReply) != 0 {
+		t.Error("a message with no source hash was recorded")
+	}
+}
+
+// Attacker-supplied text reaches the log, so it must not be able to
+// forge extra lines or run unbounded.
+func TestTheLoggedSnippetIsBoundedAndSingleLine(t *testing.T) {
+	got := snippetOf([]byte("title\nwith newlines"), []byte(bytes.NewBufferString("x").String()+
+		string(bytes.Repeat([]byte("y"), 500))))
+	if strings.ContainsAny(got, "\n\r") {
+		t.Errorf("snippet carries newlines and could forge log lines: %q", got)
+	}
+	if len([]rune(got)) > 64 {
+		t.Errorf("snippet is %d runes, want it bounded", len([]rune(got)))
 	}
 }
