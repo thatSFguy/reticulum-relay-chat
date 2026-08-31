@@ -37,6 +37,10 @@ None of it needs a special client - your existing one already speaks everything 
 # Where the hub's long-term Reticulum identity is stored. Created on
 # first run if it does not exist. The destination hash clients add is
 # derived from this identity + the rrc.hub aspect. (default "hub_identity")
+#
+# With mention_lxmf on the hub keeps a SECOND identity beside this one,
+# for its notification address only — see lxmf_identity_path. Back up
+# both, or clients lose the hub and recipients lose the sender.
 identity_path = "hub_identity"
 
 # RNS destination aspect the hub announces under. (default "rrc.hub")
@@ -306,6 +310,28 @@ mention_snippet_bytes = 140    # how much of the message a notification quotes (
 # It announces as "<name>(noreply)" rather than the hub's own name, and
 # answers anyone who messages it, so it does not pose as a person. Set false if you would rather the hub announced only rrc.hub.
 mention_lxmf = true
+
+# Where the identity behind that lxmf.delivery destination is stored.
+# Created on first run. Unset = identity_path with ".lxmf" appended, so
+# it lands beside the hub identity wherever you moved that to.
+#
+# It is a SEPARATE identity from the hub's, and that is the point. The
+# two destinations always had different hashes — rrc.hub and
+# lxmf.delivery are different aspects — but they used to derive from one
+# key, so both announces carried the same public key and the same
+# identity hash. A client that stores what it hears keyed by identity
+# rather than by destination sees one entry, not two, and the later
+# announce overwrites the earlier: the hub stops looking like somewhere
+# you can join a room and turns into a "(noreply)" contact. Nothing on
+# the sending side can observe that — announces are unacknowledged — so
+# the identities are simply kept apart.
+#
+# UPGRADING: a hub that ran an older build generates this key on first
+# start with the new one, which CHANGES its notification address.
+# Recipients see notifications from a new sender, and replies to the old
+# address go nowhere. Set this to your identity_path to keep the old
+# address instead of getting a new one.
+lxmf_identity_path = ""
 
 # Pin a propagation node by its lxmf.propagation destination hash (32
 # hex characters). Unset = auto-select.
