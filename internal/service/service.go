@@ -250,8 +250,17 @@ func (s *Service) Run(ctx context.Context) error {
 
 // --- announce ---------------------------------------------------------
 
+// buildAnnounce builds an announce for the hub's rrc.hub destination.
+//
+// The app_data is the SPEC §4.6 CBOR map, not the hub name as bare
+// UTF-8 that this used to send — see rrc.HubAppData for why the
+// distinction is not cosmetic.
 func (s *Service) buildAnnounce(context byte) (*rns.Packet, error) {
-	return rns.BuildAnnounceWithContext(s.identity, hubAspect, []byte(s.cfg.Hub.Name), nil, context)
+	appData, err := rrc.HubAppData(s.cfg.Hub.Name)
+	if err != nil {
+		return nil, fmt.Errorf("rrc.hub app_data: %w", err)
+	}
+	return rns.BuildAnnounceWithContext(s.identity, hubAspect, appData, nil, context)
 }
 
 func (s *Service) announceOnce() {
