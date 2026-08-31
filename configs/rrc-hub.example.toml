@@ -149,6 +149,17 @@ include_joined_member_list = false
 ping_interval = "30s"
 ping_timeout = "60s"
 
+# Largest room topic the hub will store, in bytes. Server-side, and
+# separate from max_msg_body_bytes on purpose: a topic is persisted to
+# rooms.toml and re-sent to every joiner in the room-info NOTICE, so it
+# should not grow just because the message limit was raised.
+#
+# Keep it comfortably below max_msg_body_bytes: the topic arrives inside
+# a "/topic <room> <text>" command and the whole line is bounded by that
+# limit, so a value equal to it makes the top of the range unreachable.
+# (default 256)
+max_topic_bytes = 256
+
 # Allow large payloads to transfer as RNS Resources (greeting/MOTD over
 # 512 bytes, inbound RESOURCE_ENVELOPE handling). (default true)
 enable_resource_transfer = true

@@ -1,5 +1,5 @@
 // Package lxmfaddr derives a peer's LXMF delivery address from the
-// public key that peer proves over a §6.6 LINKIDENTIFY.
+// public key that peer proves over a §6.7.6 LINKIDENTIFY.
 //
 // An RRC hub only ever sees a client while its Reticulum Link is up:
 // the protocol has no store-and-forward, so a hub with something to say

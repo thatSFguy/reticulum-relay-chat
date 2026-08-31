@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/hex"
 	"log"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -250,19 +251,48 @@ func (h *Hub) openHistory() {
 func (h *Hub) reloadTrust() {
 	h.trusted = make(map[string]struct{})
 	for _, t := range h.cfg.TrustedIdentities {
-		if n := normHex(t); n != "" {
+		if n, ok := h.acceptConfiguredHash("trusted_identities", t); ok {
 			h.trusted[n] = struct{}{}
 		}
 	}
 	h.banned = make(map[string]struct{})
 	for _, b := range h.cfg.BannedIdentities {
-		if n := normHex(b); n != "" {
+		if n, ok := h.acceptConfiguredHash("banned_identities", b); ok {
 			h.banned[n] = struct{}{}
 		}
 	}
 	for k := range h.klines {
 		h.banned[k] = struct{}{}
 	}
+}
+
+// acceptConfiguredHash validates one configured identity hash, logging
+// and dropping anything that could never match.
+//
+// isServerOp and isBanned compare against the hex of a full 16-byte
+// identity hash, so an entry of any other shape is not a weaker rule —
+// it is a rule that can never fire. Previously such an entry was
+// lowercased and stored, and the operator's only evidence was a
+// permanent, unexplained "not authorized". The most likely way to
+// produce one is not a typo but a category error the rest of this
+// project has to keep straight too: pasting a DESTINATION hash where an
+// IDENTITY hash belongs. They are the same length and both hex, which
+// is exactly why a length check alone would not have caught it and why
+// the log line says which field and what was wrong.
+//
+// This is the same argument audit A14 made for command-supplied bans;
+// the config path simply never got it.
+func (h *Hub) acceptConfiguredHash(field, raw string) (string, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return "", false
+	}
+	n, err := parseHexHash(raw)
+	if err != nil {
+		h.log.Printf("config: ignoring %s entry %q — %v (an identity hash is %d hex bytes; a destination hash is not an identity hash)",
+			field, snippet(raw, 40), err, identityHashLen)
+		return "", false
+	}
+	return n, true
 }
 
 // loadKlines reads the kline file (if configured) into the kline + banned

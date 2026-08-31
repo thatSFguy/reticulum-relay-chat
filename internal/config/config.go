@@ -78,6 +78,22 @@ type HubConfig struct {
 	MaxRegisteredRoomsPerIdentity int `toml:"max_registered_rooms_per_identity"`
 	MaxRoomAclEntries             int `toml:"max_room_acl_entries"`
 
+	// MaxTopicBytes bounds a room topic. Server-side, and deliberately
+	// NOT part of LimitsConfig: that set is advertised in WELCOME, and
+	// adding a key to it is a wire change every client would have to be
+	// taught. A topic is persisted to rooms.toml and re-sent to every
+	// joiner in the room-info NOTICE, so it needs a bound of its own
+	// rather than inheriting whatever max_msg_body_bytes happens to be.
+	//
+	// The default is 256 rather than 350 so that a MAXIMUM-length topic
+	// still fits inside the command that sets it: a topic arrives as
+	// "/topic <room> <text>", the whole line is bounded by
+	// max_msg_body_bytes (350), and a 64-byte room name plus the verb
+	// costs ~73 of those. Setting this equal to max_msg_body_bytes
+	// would make the last ~90 bytes of the range unreachable — a limit
+	// that advertises more than it can accept.
+	MaxTopicBytes int `toml:"max_topic_bytes"`
+
 	// Hub-initiated keepalive. A zero PingInterval disables hub PINGs; a
 	// zero PingTimeout disables tearing a link down for a missing PONG.
 	PingInterval Duration `toml:"ping_interval"`
@@ -277,6 +293,7 @@ func defaults() Config {
 			MaxRooms:                      512,
 			MaxRegisteredRoomsPerIdentity: 16,
 			MaxRoomAclEntries:             256,
+			MaxTopicBytes:                 256,
 			// Keepalive ON by default. These used to default to 0,
 			// which disabled hub PINGs *and* link teardown on a missing
 			// PONG — so a hub never learned that a client had gone and
@@ -333,6 +350,9 @@ func Load(path string) (*Config, error) {
 	applyMentionDefaults(&c.Hub)
 	if c.Hub.MaxResourceBytes <= 0 {
 		c.Hub.MaxResourceBytes = 262144
+	}
+	if c.Hub.MaxTopicBytes <= 0 {
+		c.Hub.MaxTopicBytes = 256
 	}
 	if c.Hub.MaxPendingResourceExpectations <= 0 {
 		c.Hub.MaxPendingResourceExpectations = 8

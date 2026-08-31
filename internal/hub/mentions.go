@@ -407,20 +407,51 @@ func (s *Session) rememberPeer() {
 	h.pinPeerAddresses()
 }
 
-// evictOldestPeerLocked drops the least recently seen peer to make room
-// for a new one. Caller must hold h.mu.
+// evictOldestPeerLocked drops a peer to make room for a new one,
+// preferring one that is owed nothing. Caller must hold h.mu.
+//
+// Least-recently-seen alone was exactly the wrong rule. A peer with
+// queued mentions is by definition one who has NOT been seen lately —
+// that is what "away" means and why the mentions are queued — so
+// evicting the oldest entry selected precisely the rows the queue
+// exists to protect, and it did so silently. Ordinary churn is enough:
+// max_known_peers strangers connecting in sequence flushed every held
+// mention, and MaxSessions bounds only CONCURRENT links, not the total.
+// That defeats the one delivery guarantee the RRC fallback makes —
+// "held here and handed over when you next connect".
+//
+// So: evict the oldest peer with nothing pending. Only when every peer
+// is owed something does the oldest-overall fall, because at that point
+// the alternative is refusing to file anyone new at all.
 func (h *Hub) evictOldestPeerLocked() {
-	oldest := ""
-	var oldestTS float64
+	oldest, oldestOwed := "", ""
+	var oldestTS, oldestOwedTS float64
 	for _, id := range peerreg.SortedIdentities(h.peers) {
 		p := h.peers[id]
+		if len(p.Mentions) > 0 {
+			if oldestOwed == "" || p.LastSeenTS < oldestOwedTS {
+				oldestOwed, oldestOwedTS = id, p.LastSeenTS
+			}
+			continue
+		}
 		if oldest == "" || p.LastSeenTS < oldestTS {
 			oldest, oldestTS = id, p.LastSeenTS
 		}
 	}
-	if oldest != "" {
-		delete(h.peers, oldest)
+	if oldest == "" {
+		// Everybody is owed a mention. Something still has to go, but
+		// it is worth a log line: a hub in this state is dropping
+		// notifications it accepted, and max_known_peers is too small
+		// for the number of people it is holding mail for.
+		if oldestOwed == "" {
+			return
+		}
+		h.log.Printf("peers: directory full (%d) and every peer has mentions pending — evicting %s and its %d held mention(s)",
+			len(h.peers), shortHexStr(oldestOwed), len(h.peers[oldestOwed].Mentions))
+		delete(h.peers, oldestOwed)
+		return
 	}
+	delete(h.peers, oldest)
 }
 
 // mentionAuthor renders who did the mentioning: the nickname when there
