@@ -166,12 +166,11 @@ func (s *Service) announceDelivery() {
 	if s.lxmfDest == nil {
 		return
 	}
-	appData, err := rns.EncodeLXMFAppData([]byte(s.cfg.Hub.LXMFName()), nil)
-	if err != nil {
-		s.log.Printf("lxmf announce build failed: %v", err)
-		return
-	}
-	pkt, err := rns.BuildAnnounce(s.lxmfIdentity, lxmf.FullName(), appData, nil)
+	// Built through buildDeliveryAnnounce so the announce this
+	// broadcasts and the one the Transport builds for a path response
+	// cannot name different identities. They were two call sites, and
+	// the identity is now the thing this file exists to keep separate.
+	pkt, err := s.buildDeliveryAnnounce(rns.ContextNone)
 	if err != nil {
 		s.log.Printf("lxmf announce build failed: %v", err)
 		return

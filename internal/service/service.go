@@ -255,7 +255,12 @@ func (s *Service) buildAnnounce(context byte) (*rns.Packet, error) {
 }
 
 func (s *Service) announceOnce() {
-	pkt, err := rns.BuildAnnounce(s.identity, hubAspect, []byte(s.cfg.Hub.Name), nil)
+	// Built through buildAnnounce, not a second BuildAnnounce call of
+	// its own: the builder and the broadcaster used to be two call
+	// sites naming the identity separately, and the pair can drift —
+	// which is exactly the bug the lxmf side of this was split to
+	// avoid (see Config.LXMFIdentityPath).
+	pkt, err := s.buildAnnounce(rns.ContextNone)
 	if err != nil {
 		s.log.Printf("announce build failed: %v", err)
 		return
