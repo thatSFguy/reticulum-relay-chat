@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/thatSFguy/reticulum-go/rns"
 	"github.com/thatSFguy/reticulum-relay-chat/internal/config"
 )
@@ -88,6 +89,72 @@ func (c *captureIface) announcedKeyFor(t *testing.T, destHash []byte) []byte {
 	}
 	t.Fatalf("%x was never announced", destHash)
 	return nil
+}
+
+// announcedAppDataFor returns the app_data inside the announce for
+// destHash. Parsed through rns.ParseAnnounce rather than indexed by
+// hand: app_data sits after an optional 32-byte ratchet, and a fixed
+// offset is the exact mistake SPEC §4.5 warns about.
+func (c *captureIface) announcedAppDataFor(t *testing.T, destHash []byte) []byte {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, f := range c.frames {
+		pkt, err := rns.ParsePacket(f.raw)
+		if err != nil {
+			t.Fatalf("broadcast a frame that does not parse: %v", err)
+		}
+		if !bytes.Equal(pkt.DestHash, destHash) {
+			continue
+		}
+		a, err := rns.ParseAnnounce(pkt)
+		if err != nil {
+			t.Fatalf("announce for %x does not parse: %v", destHash, err)
+		}
+		return a.AppData
+	}
+	t.Fatalf("%x was never announced", destHash)
+	return nil
+}
+
+// The rrc.hub announce must carry the SPEC §4.6 CBOR map.
+//
+// It used to carry the hub name as bare UTF-8, and the failure that
+// caused is silent in both directions: a CBOR decoder reading a bare
+// name consumes its first letter as an item header and returns a
+// plausible-looking truncation ("Michmesh RRC Hub" -> "ichmesh RRC H"),
+// while the sending hub logs a clean "announced rrc.hub". Nothing short
+// of decoding the bytes off the wire catches it, which is why this is
+// asserted here and not against cfg.Hub.Name somewhere upstream.
+func TestTheHubAnnounceCarriesTheCborAppDataMap(t *testing.T) {
+	h := notifyingConfig(t.TempDir())
+	// A name whose first byte is a valid CBOR byte-string head, so a
+	// regression to the bare form would decode without erroring rather
+	// than failing loudly.
+	h.Name = "Michmesh RRC Hub"
+	svc := newTestService(t, h)
+	cap := newCaptureIface()
+	svc.transport.AddInterface(cap)
+
+	svc.announceOnce()
+
+	appData := cap.announcedAppDataFor(t, svc.destHash)
+
+	// Decoded whole: leftover bytes are what made the bare form look
+	// like a valid decode in the first place.
+	var got map[string]any
+	if err := cbor.Unmarshal(appData, &got); err != nil {
+		t.Fatalf("rrc.hub app_data is not a CBOR map: %v (bytes %x)", err, appData)
+	}
+	if got["hub"] != h.Name {
+		t.Errorf("app_data hub = %q, want %q", got["hub"], h.Name)
+	}
+	if got["proto"] != "rrc" {
+		t.Errorf("app_data proto = %v, want \"rrc\"", got["proto"])
+	}
+	if v, ok := got["v"].(uint64); !ok || v != 1 {
+		t.Errorf("app_data v = %v (%T), want 1", got["v"], got["v"])
+	}
 }
 
 // The two destinations must announce DIFFERENT public keys.
