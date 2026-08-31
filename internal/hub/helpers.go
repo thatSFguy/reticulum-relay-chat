@@ -57,6 +57,15 @@ func shortHex12(h []byte) string {
 	return s
 }
 
+// shortHexStr renders the first 8 chars of an already-hex identity, for
+// logs that hold the hex form rather than the bytes.
+func shortHexStr(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
+}
+
 // normHex lowercases a hex hash and strips an optional "0x" prefix and
 // surrounding whitespace.
 func normHex(s string) string {

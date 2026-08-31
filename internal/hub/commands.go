@@ -35,6 +35,23 @@ func dispatchBody(body string) string {
 // greeting told every arriving client "/help for commands" while the
 // hub answered "unrecognized command".
 func (s *Session) handleCommand(trimmed, _, room string) {
+	// A command is an ordinary MSG body, and handleMsg dispatches it
+	// BEFORE the body-size check — so max_msg_body_bytes never reached
+	// this path. That is not merely a missing cap on one command: every
+	// present and future command handler was receiving an argument
+	// string bounded only by the 8 KiB link frame, and /topic wrote its
+	// share of that straight into rooms.toml and re-broadcast it to the
+	// room. Bounded here, once, so a new command cannot reintroduce it.
+	//
+	// Measured against the same limit an ordinary message gets: a
+	// command IS an ordinary message as far as every deployed client is
+	// concerned, and a hub that accepts more from one than the other is
+	// making a distinction its own clients cannot see.
+	if m := s.hub.limits.MaxMsgBodyBytes; m > 0 && len(trimmed) > m {
+		s.sendError(roomPtr(room), fmt.Sprintf(
+			"command exceeds the hub body-size limit (%d bytes)", m))
+		return
+	}
 	parts := strings.Fields(strings.TrimPrefix(trimmed, "/"))
 	if len(parts) == 0 {
 		s.sendError(roomPtr(room), "unrecognized command — try /help")
@@ -220,7 +237,14 @@ func (s *Session) cmdWho(parts []string, room string) {
 		s.sendNotice(roomPtr(room), "members in "+target+": (none)")
 		return
 	}
-	if r.private && !serverOp {
+	// A member may always see who is in their own room. +p hides a room
+	// from OUTSIDE — /list omits it and a stranger is told nothing —
+	// but the sibling check in cmdTopic's view path already spelled
+	// this out as `private && !serverOp && !hasMember`, and only this
+	// copy was missing the last clause. Without it a +p room is one
+	// nobody inside it can enumerate either, which is not privacy, just
+	// breakage.
+	if r.private && !serverOp && !r.hasMember(s) {
 		h.mu.Unlock()
 		s.sendNotice(roomPtr(room), "room "+target+" is private")
 		return
@@ -567,6 +591,16 @@ func (s *Session) cmdTopic(parts []string, room string) {
 		s.sendError(roomPtr(target), "topic must be valid UTF-8")
 		return
 	}
+	// And it must be bounded. handleCommand already caps the whole
+	// command line, but the topic is the part that reaches DISK and is
+	// re-sent to every future joiner in the room-info NOTICE, so it
+	// carries its own limit rather than inheriting whatever the command
+	// bound happens to be.
+	if m := h.cfg.MaxTopicBytes; m > 0 && len(newTopic) > m {
+		s.sendError(roomPtr(target), fmt.Sprintf(
+			"topic exceeds the hub limit (%d bytes)", m))
+		return
+	}
 	h.mu.Lock()
 	r := h.roomLocked(target)
 	if r == nil {
@@ -575,6 +609,24 @@ func (s *Session) cmdTopic(parts []string, room string) {
 		return
 	}
 	serverOp := h.isServerOp(s.identity())
+	// Setting a topic requires being IN the room.
+	//
+	// Membership is the authorization, for the same reason /history
+	// gives: joining already cleared this room's ban, key and invite
+	// gates, so "you may change what this room is about" reduces to
+	// "you are in here" without re-deriving a second, divergent copy of
+	// the join gate. Without this a peer BANNED from the room could
+	// still rewrite its topic — commands are dispatched before any room
+	// gate — and for a registered room that edit persists to
+	// rooms.toml and is broadcast to every member.
+	//
+	// Note the view path a few lines above already worked this way for
+	// +p rooms; only the set path was missing it.
+	if !r.hasMember(s) && !serverOp {
+		h.mu.Unlock()
+		s.sendError(roomPtr(target), "join the room to set its topic")
+		return
+	}
 	if r.topicOpsOnly && !r.isOp(s.identityHex(), serverOp) {
 		h.mu.Unlock()
 		s.sendError(roomPtr(target), "not authorized (+t)")

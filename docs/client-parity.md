@@ -40,7 +40,9 @@ Client requirements:
 Commands (any user unless noted):
 - `/list` — registered, non-private rooms
 - `/who [room]` (alias `/names`) — member list of a room
-- `/topic <room> [text]` — view (no text) or set the topic
+- `/topic <room> [text]` — view (no text) or set the topic. Viewing a
+  `+p` room needs membership; SETTING needs membership (or server-op),
+  and room-op as well when the room is `+t`
 - `/mode <room> <±flag> [arg]` — set room / user modes
 - `/kick <room> <nick|hashprefix>` — room-op
 - `/op` `/deop` `/voice` `/devoice` `<room> <target>` — room-op

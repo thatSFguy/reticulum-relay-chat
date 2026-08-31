@@ -165,7 +165,7 @@ func (s *Session) OnInbound(frame []byte) {
 		return
 	}
 
-	// A verified RNS identity (bound via §6.6 LINKIDENTIFY) is a hard
+	// A verified RNS identity (bound via §6.7.6 LINKIDENTIFY) is a hard
 	// precondition for processing any RRC frame: an un-identified peer is
 	// never welcomed and never authorized (A1). Rechecking it on every
 	// frame also closes ban evasion (A2) — a banned identity that sent
