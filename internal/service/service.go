@@ -212,10 +212,11 @@ func (s *Service) Run(ctx context.Context) error {
 	// runs regardless.
 	if s.cfg.Hub.AnnounceOnStart {
 		s.announceOnce()
-		// The LXMF delivery destination is announced on the same
-		// schedule: a notification from an unannounced source cannot be
-		// verified by its recipient.
-		s.announceDelivery()
+		// The LXMF delivery destination is NOT announced here. It rides
+		// its own half-interval-offset schedule (deliveryAnnounceLoop),
+		// and announcing it at startup too would recreate the very
+		// same-millisecond pair the offset exists to break up — on a hub
+		// that gets restarted often, that is most of its announces.
 	}
 	s.log.Printf("RRC hub running — add this hub in a client by hash: %s", s.DestHashHex())
 
@@ -249,8 +250,12 @@ func (s *Service) announceOnce() {
 	s.log.Printf("announced rrc.hub (%s)", s.DestHashHex())
 }
 
+// announceLoop re-announces rrc.hub every announce_interval, and starts
+// the delivery destination's own loop half an interval behind it.
 func (s *Service) announceLoop(ctx context.Context) {
-	t := time.NewTicker(s.cfg.Hub.AnnounceInterval.Duration)
+	iv := s.cfg.Hub.AnnounceInterval.Duration
+	go s.deliveryAnnounceLoop(ctx, iv)
+	t := time.NewTicker(iv)
 	defer t.Stop()
 	for {
 		select {
@@ -258,6 +263,44 @@ func (s *Service) announceLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			s.announceOnce()
+		}
+	}
+}
+
+// deliveryAnnounceLoop announces lxmf.delivery on the same period as
+// rrc.hub, phase-shifted by iv/2.
+//
+// The two used to fire from ONE tick, microseconds apart. That is two
+// announce packets on the same interface in the same millisecond, which
+// a receiving stack sees as a burst rather than as two independent
+// destinations — and announce rate control is applied per interface, so
+// a burst is the shape most likely to be queued or dropped. A dropped
+// announce is invisible from the sending side (SPEC §4.5 has no
+// acknowledgement), which is why this was never visible in a log that
+// said "announced" twice.
+//
+// Spacing them also halves the worst case for a client that is only
+// listening part of the time: with both on one tick, a client that
+// misses the tick misses BOTH destinations for a full interval.
+func (s *Service) deliveryAnnounceLoop(ctx context.Context, iv time.Duration) {
+	// Nothing to announce when mention notification is off — lxmfDest is
+	// set only when the notifier was built (see New).
+	if s.lxmfDest == nil {
+		return
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(iv / 2):
+	}
+	s.announceDelivery()
+	t := time.NewTicker(iv)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 			s.announceDelivery()
 		}
 	}

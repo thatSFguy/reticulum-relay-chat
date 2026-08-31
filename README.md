@@ -232,10 +232,6 @@ convention rather than a change to RRC itself.
 
 ## Deploy it
 
-> **This repository is currently private.** The download steps below
-> need access to it. Everything else — building from a checkout, the
-> config, the systemd unit — works regardless.
-
 ### 1. Get a binary
 
 Grab the binary for your machine, plus the example config for that same

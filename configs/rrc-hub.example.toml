@@ -49,9 +49,10 @@ announce_on_start = true
 # How often the hub re-announces itself so relays keep a fresh path.
 # (default "30m")
 #
-# Be careful lowering this. The hub announces TWO destinations per tick
-# (rrc.hub and lxmf.delivery), so this is two packets flooded across the
-# mesh every interval, forever — and public transport nodes police it.
+# Be careful lowering this. The hub announces TWO destinations on this
+# period — rrc.hub, and lxmf.delivery half an interval behind it — so it
+# is one packet flooded across the mesh every announce_interval/2,
+# forever, and public transport nodes police it.
 # An RNS interface with announce_rate_target set counts violations per
 # destination and applies a penalty past announce_rate_grace, which in
 # practice means your hub gets throttled or dropped by the node you rely
