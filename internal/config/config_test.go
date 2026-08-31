@@ -114,3 +114,31 @@ func TestTheMentionDefaultsAreInternallyConsistent(t *testing.T) {
 		t.Error("the hub would announce an lxmf.delivery destination with no name")
 	}
 }
+
+// The notification identity follows the hub identity around.
+//
+// An operator who moved identity_path did so for a reason — a data
+// directory, a mounted volume, several hubs in one working directory —
+// and a second key defaulted to a fixed name would land outside all of
+// that. A key written where the operator does not back up is a
+// notification address that changes the next time the container is
+// recreated, which every recipient sees as a new stranger writing to
+// them.
+func TestTheNotificationIdentitySitsBesideTheHubIdentity(t *testing.T) {
+	h := HubConfig{IdentityPath: "/srv/rrc/state/hub_identity"}
+	if got, want := h.LXMFIdentityFile(), "/srv/rrc/state/hub_identity.lxmf"; got != want {
+		t.Errorf("LXMFIdentityFile() = %q, want %q", got, want)
+	}
+
+	// An explicit path wins — that is how an upgrading hub keeps its
+	// old notification address by pointing at the hub identity.
+	h.LXMFIdentityPath = "/srv/rrc/state/hub_identity"
+	if got, want := h.LXMFIdentityFile(), "/srv/rrc/state/hub_identity"; got != want {
+		t.Errorf("explicit lxmf_identity_path ignored: got %q, want %q", got, want)
+	}
+
+	// And an unconfigured hub still names a file rather than "".lxmf.
+	if got, want := (HubConfig{}).LXMFIdentityFile(), "hub_identity.lxmf"; got != want {
+		t.Errorf("empty config: LXMFIdentityFile() = %q, want %q", got, want)
+	}
+}

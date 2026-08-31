@@ -88,7 +88,10 @@ type lxmfNotifier struct {
 // and their client can return the delivery proof the direct route
 // depends on.
 func newLXMFNotifier(s *Service) (*lxmfNotifier, error) {
-	delivery, err := lxmf.NewDelivery(s.transport, s.identity, s.buildDeliveryAnnounce)
+	if s.lxmfIdentity == nil {
+		return nil, errors.New("no lxmf notification identity")
+	}
+	delivery, err := lxmf.NewDelivery(s.transport, s.lxmfIdentity, s.buildDeliveryAnnounce)
 	if err != nil {
 		return nil, fmt.Errorf("lxmf delivery: %w", err)
 	}
@@ -139,6 +142,11 @@ func newLXMFNotifier(s *Service) (*lxmfNotifier, error) {
 // inbound traffic to price, and asking senders to grind proof-of-work
 // at a hub that will not read their replies would be dishonest.
 //
+// It is signed by s.lxmfIdentity, not the hub identity. The two
+// destinations used to share one key, which left a client free to store
+// them as a single entry keyed by identity and let the second announce
+// overwrite the first — see Config.LXMFIdentityPath.
+//
 // The name is cfg.LXMFName(), NOT cfg.Name. A messaging client lists an
 // lxmf.delivery announce beside real people, so under the hub's own
 // name this destination is indistinguishable from somebody you can talk
@@ -149,7 +157,7 @@ func (s *Service) buildDeliveryAnnounce(context byte) (*rns.Packet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lxmf announce app_data: %w", err)
 	}
-	return rns.BuildAnnounceWithContext(s.identity, lxmf.FullName(), appData, nil, context)
+	return rns.BuildAnnounceWithContext(s.lxmfIdentity, lxmf.FullName(), appData, nil, context)
 }
 
 // announceDelivery broadcasts that announce. Called wherever the hub
@@ -163,7 +171,7 @@ func (s *Service) announceDelivery() {
 		s.log.Printf("lxmf announce build failed: %v", err)
 		return
 	}
-	pkt, err := rns.BuildAnnounce(s.identity, lxmf.FullName(), appData, nil)
+	pkt, err := rns.BuildAnnounce(s.lxmfIdentity, lxmf.FullName(), appData, nil)
 	if err != nil {
 		s.log.Printf("lxmf announce build failed: %v", err)
 		return

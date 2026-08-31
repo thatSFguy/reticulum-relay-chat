@@ -159,6 +159,26 @@ type HubConfig struct {
 	// LXMFName() rather than the hub's own name, and answers anyone
 	// who messages it, so it does not masquerade as a person.
 	MentionLXMF bool `toml:"mention_lxmf"`
+	// LXMFIdentityPath is where the identity behind the hub's OWN
+	// lxmf.delivery destination is stored. Created on first run.
+	// Empty derives it from IdentityPath — see LXMFIdentityFile.
+	//
+	// That destination now hangs off an identity of its OWN. It used to
+	// share the hub's: different aspects, so the two destination hashes
+	// always differed, but one public key and one identity hash behind
+	// both of them. Any client that keys what it stores by identity
+	// rather than by destination therefore saw the hub's two announces
+	// as one entry — and the later announce overwrote the earlier, which
+	// is a hub that turns into a "(noreply)" contact and stops looking
+	// like somewhere you can join a room. Separate identities remove the
+	// shared key that makes that collapse possible.
+	//
+	// The cost is that the notification address changes when a hub that
+	// ran an older build upgrades: the new identity is generated on
+	// first run, so recipients see notifications from a new sender and
+	// any reply thread against the old address is orphaned. Point this
+	// at the hub identity file to keep the old address instead.
+	LXMFIdentityPath string `toml:"lxmf_identity_path"`
 	// LXMFPropagationNode pins the store-and-forward node the fallback
 	// route uses. Empty auto-selects; see internal/service/propnodes.go.
 	LXMFPropagationNode string `toml:"lxmf_propagation_node"`
@@ -441,6 +461,28 @@ const LXMFNoReplySuffix = "(noreply)"
 // leaves 55 for the hub's own name, comfortably more than the 32 bytes
 // RRC allows a nickname.
 const lxmfNameMaxBytes = 64
+
+// LXMFIdentityFile is where the notification identity is stored:
+// LXMFIdentityPath when the operator set one, otherwise IdentityPath
+// with ".lxmf" appended.
+//
+// Derived from IdentityPath rather than fixed at "hub_identity.lxmf" so
+// that an operator who moved the hub identity — a data directory, a
+// mounted volume, one process per hub in one working directory — gets
+// the second key beside the first without having to learn that a
+// second key exists. A key written somewhere the operator does not back
+// up is a notification address that changes the next time the container
+// is recreated.
+func (h HubConfig) LXMFIdentityFile() string {
+	if p := strings.TrimSpace(h.LXMFIdentityPath); p != "" {
+		return p
+	}
+	base := strings.TrimSpace(h.IdentityPath)
+	if base == "" {
+		base = "hub_identity"
+	}
+	return base + ".lxmf"
+}
 
 // LXMFName is the display name for the hub's lxmf.delivery announce:
 // the hub's name with LXMFNoReplySuffix appended, truncated to fit.

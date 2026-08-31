@@ -82,6 +82,11 @@ type Service struct {
 	// nothing to announce.
 	lxmfDest []byte
 
+	// lxmfIdentity signs and owns that destination. It is NOT the hub
+	// identity: see Config.LXMFIdentityPath for why they were split.
+	// nil whenever lxmfDest is nil — the two are set together.
+	lxmfIdentity *rns.Identity
+
 	// notifier is the installed LXMF notifier, kept so the inbound
 	// auto-reply can send over the same destination.
 	notifier *lxmfNotifier
@@ -110,7 +115,7 @@ type peerBinding struct {
 // New builds the service: loads (or creates) the hub identity, wires the
 // transport and the hub, and registers the rrc.hub destination.
 func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
-	id, err := loadOrCreateIdentity(cfg.Hub.IdentityPath, logger)
+	id, err := loadOrCreateIdentity(cfg.Hub.IdentityPath, logger, "hub")
 	if err != nil {
 		return nil, err
 	}
@@ -149,13 +154,25 @@ func New(cfg *config.Config, logger *log.Logger) (*Service, error) {
 	// holding mentions until the peer's next RRC session, which is what
 	// it does with the feature off.
 	if cfg.Hub.MentionNotify && cfg.Hub.MentionLXMF {
-		notifier, err := newLXMFNotifier(svc)
+		// A second identity, loaded only for the hub that actually
+		// notifies — a hub with the feature off has no notification
+		// address and should not be left holding a key for one.
+		lxmfID, err := loadOrCreateIdentity(cfg.Hub.LXMFIdentityFile(), logger, "lxmf notification")
 		if err != nil {
 			logger.Printf("lxmf: mention notifications disabled — %v", err)
 		} else {
-			svc.hub.SetOfflineNotifier(notifier)
-			svc.notifier = notifier
-			svc.lxmfDest = id.DestinationHashFor(lxmf.FullName())
+			svc.lxmfIdentity = lxmfID
+			notifier, err := newLXMFNotifier(svc)
+			if err != nil {
+				logger.Printf("lxmf: mention notifications disabled — %v", err)
+				svc.lxmfIdentity = nil
+			} else {
+				svc.hub.SetOfflineNotifier(notifier)
+				svc.notifier = notifier
+				svc.lxmfDest = lxmfID.DestinationHashFor(lxmf.FullName())
+				logger.Printf("lxmf: notifications from %x — identity %s, which is NOT the hub identity",
+					svc.lxmfDest, lxmfID.HexHash())
+			}
 		}
 	}
 
@@ -575,13 +592,18 @@ func (l *rnsLink) SendResource(payload []byte) error {
 
 // --- identity ---------------------------------------------------------
 
-func loadOrCreateIdentity(path string, logger *log.Logger) (*rns.Identity, error) {
+// loadOrCreateIdentity loads the identity at path, generating and
+// saving one if there is nothing there. what names it in the log — the
+// hub runs two (see Config.LXMFIdentityPath), and "generated a new
+// identity" without saying which is a line that reads like the hub just
+// changed the address clients dial.
+func loadOrCreateIdentity(path string, logger *log.Logger, what string) (*rns.Identity, error) {
 	if _, err := os.Stat(path); err == nil {
 		id, err := rns.IdentityFromFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("load identity %s: %w", path, err)
 		}
-		logger.Printf("loaded hub identity from %s", path)
+		logger.Printf("loaded %s identity from %s", what, path)
 		return id, nil
 	}
 	id, err := rns.NewIdentity()
@@ -591,7 +613,7 @@ func loadOrCreateIdentity(path string, logger *log.Logger) (*rns.Identity, error
 	if err := id.Save(path); err != nil {
 		return nil, fmt.Errorf("save identity %s: %w", path, err)
 	}
-	logger.Printf("generated a new hub identity at %s", path)
+	logger.Printf("generated a new %s identity at %s", what, path)
 	return id, nil
 }
 
