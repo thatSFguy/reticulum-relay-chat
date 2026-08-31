@@ -266,6 +266,11 @@ func (s *Session) handleHello(env *rrc.Envelope) {
 	if nick == "" {
 		nick = rrc.LegacyHelloNick(env)
 	}
+	// asked is the claim as typed, minus the validation normalizeNick
+	// also applies. Kept because the granted name may differ for TWO
+	// reasons now — somebody else owns it, or it had spaces in it — and
+	// the peer is owed the right explanation.
+	asked, _ := normalizeText(nick, h.limits.MaxNickBytes)
 	if n, ok := normalizeNick(nick, h.limits.MaxNickBytes); ok {
 		nick = n
 	} else {
@@ -280,12 +285,12 @@ func (s *Session) handleHello(env *rrc.Envelope) {
 	// Done before WELCOME so everything downstream — the peer
 	// directory, fan-out, mention resolution — sees one name.
 	h.mu.Lock()
-	granted, renamed := s.setNickLocked(nick)
+	granted, renamed, lookalike := s.setNickLocked(nick)
 	h.mu.Unlock()
 
-	if renamed {
+	if renamed || (granted != "" && granted != asked) {
 		h.log.Printf("session welcomed: %s (nick=%q, asked for %q)",
-			shortHash(s.identity()), granted, nick)
+			shortHash(s.identity()), granted, asked)
 	} else {
 		h.log.Printf("session welcomed: %s (nick=%q)", shortHash(s.identity()), granted)
 	}
@@ -303,7 +308,18 @@ func (s *Session) handleHello(env *rrc.Envelope) {
 	// Nothing in RRC can carry "you asked for sam and you are sam1" —
 	// WELCOME has no field for it — so it is said in a NOTICE, which
 	// every deployed client already renders.
-	if renamed {
+	switch {
+	case granted == "" && asked != "":
+		// Valid text, but nothing an @mention could address survived.
+		s.sendNotice(nil, nickUnusableNotice(asked))
+	case granted != "" && asked != nick:
+		// The name was rewritten to be mentionable. Said first even
+		// when the rewritten form was also taken: a suffix is the
+		// ordinary thing that happens here, this is the surprise.
+		s.sendNotice(nil, nickUnmentionableNotice(asked, granted))
+	case lookalike:
+		s.sendNotice(nil, nickLookalikeNotice(nick, granted))
+	case renamed:
 		s.sendNotice(nil, nickTakenNotice(nick, granted))
 	}
 
@@ -635,23 +651,38 @@ func (s *Session) handleMsg(env *rrc.Envelope, typ int) {
 	s.mu.Lock()
 	nick := s.nick
 	s.mu.Unlock()
-	var renamedTo string
+	var renamedTo, lookalikeTo, spacedTo, spacedFrom string
 	if envNick := rrc.NickName(env); envNick != "" {
 		if want, ok := normalizeNick(envNick, h.limits.MaxNickBytes); ok && want != nick {
 			h.mu.Lock()
-			granted, renamed := s.setNickLocked(want)
+			granted, renamed, lookalike := s.setNickLocked(want)
 			h.mu.Unlock()
 			// Notify on a change of the GRANTED name, not of the asked-for
 			// one. A client that keeps asserting a taken "sam" is granted
 			// "sam1" every time, and "sam" != "sam1" on every message —
-			// testing the request would repeat the notice forever.
-			if renamed && granted != nick {
+			// testing the request would repeat the notice forever. The
+			// same trap applies to a spaced name: "sam jones" arrives
+			// on every MSG, and it is want == nick ("sam_jones")
+			// that stops this branch running twice.
+			asked, _ := normalizeText(envNick, h.limits.MaxNickBytes)
+			switch {
+			case asked != want && granted != nick:
+				spacedTo = granted
+				spacedFrom = asked
+			case lookalike && granted != nick:
+				lookalikeTo = granted
+			case renamed && granted != nick:
 				renamedTo = granted
 			}
 			nick = granted
 		}
 	}
-	if renamedTo != "" {
+	switch {
+	case spacedTo != "":
+		s.sendNotice(&room, nickUnmentionableNotice(spacedFrom, spacedTo))
+	case lookalikeTo != "":
+		s.sendNotice(&room, nickLookalikeNotice(rrc.NickName(env), lookalikeTo))
+	case renamedTo != "":
 		s.sendNotice(&room, nickTakenNotice(rrc.NickName(env), renamedTo))
 	}
 

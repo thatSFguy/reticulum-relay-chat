@@ -9,7 +9,11 @@
 .vscode/
 
 # Local hub state — never commit the long-term identity or a live config.
-hub_identity
+# Both keys: the hub identity clients dial, and the lxmf.delivery
+# notification identity beside it (v0.5.0). The second one is why this
+# is a glob — a new sibling key must not need a new ignore rule to stay
+# out of a public repo.
+hub_identity*
 /rrc-hub.toml
 *.log
 

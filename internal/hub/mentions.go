@@ -33,6 +33,14 @@ import (
 //
 // Ambiguity at any step ends the attempt for that token.
 
+// isTrimmedFromMention reports whether a rune is dropped from the ends
+// of a mention token. Shared with mentionableNick (helpers.go), which
+// has to grant names this will leave alone — two spellings of the same
+// rule is how a name becomes unmentionable again.
+func isTrimmedFromMention(r rune) bool {
+	return unicode.IsPunct(r) && r != '-' && r != '_'
+}
+
 // maxMentionsPerMessage bounds how many people one message can notify.
 // Without it, a single message listing a hundred nicknames becomes a
 // hundred notifications — a spam amplifier with the hub's return
@@ -61,9 +69,7 @@ func mentionTokens(body string) []string {
 		if strings.Count(field, "@") > 1 {
 			continue
 		}
-		tok := strings.TrimFunc(field[1:], func(r rune) bool {
-			return unicode.IsPunct(r) && r != '-' && r != '_'
-		})
+		tok := strings.TrimFunc(field[1:], isTrimmedFromMention)
 		if tok == "" {
 			continue
 		}

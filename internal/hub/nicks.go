@@ -86,6 +86,36 @@ func (h *Hub) assignNickLocked(idHex, want string) string {
 // among connected sessions only; that is a real reduction, and it is
 // the operator's own choice of configuration.
 func (h *Hub) nickOwnerLocked(nick string) string {
+	want := nickKey(nick)
+	for s := range h.sessions {
+		s.mu.Lock()
+		got := nickKey(s.nick)
+		s.mu.Unlock()
+		if got != want {
+			continue
+		}
+		if id := s.identityHex(); id != "" {
+			return id
+		}
+	}
+	for id, p := range h.peers {
+		if p.Nick != "" && nickKey(p.Nick) == want {
+			return id
+		}
+	}
+	return ""
+}
+
+// exactNickOwnerLocked is nickOwnerLocked without the folding: it
+// answers "is this exact name held?" rather than "is a name that looks
+// like this held?".
+//
+// The difference is what the peer is told. Being handed sam1 because
+// somebody else is already sam is ordinary; being handed sam1 because
+// your name renders identically to theirs is not, and a peer told the
+// wrong one of those goes looking for a conflict that is not there.
+// Caller must hold h.mu.
+func (h *Hub) exactNickOwnerLocked(nick string) string {
 	want := strings.ToLower(nick)
 	for s := range h.sessions {
 		s.mu.Lock()
@@ -140,9 +170,12 @@ func nickWithSuffix(base, suffix string, maxBytes int) string {
 // one the hub granted and broadcast — so "sam2" would look unclaimed
 // the moment its owner disconnected, and "@sam2" would resolve to
 // nobody. Observed live before this line existed.
-func (s *Session) setNickLocked(want string) (granted string, renamed bool) {
+func (s *Session) setNickLocked(want string) (granted string, renamed, lookalike bool) {
 	h := s.hub
 	idHex := s.identityHex()
+	// Asked before the grant: afterwards this session holds the name
+	// and would answer as its own owner.
+	exact := h.exactNickOwnerLocked(want)
 	granted = h.assignNickLocked(idHex, want)
 	s.mu.Lock()
 	s.nick = granted
@@ -155,7 +188,51 @@ func (s *Session) setNickLocked(want string) (granted string, renamed bool) {
 			h.peersDirty = true
 		}
 	}
-	return granted, want != "" && granted != want
+	renamed = want != "" && granted != want
+	// Nobody holds the string, yet the name was taken: it collided on
+	// what it looks like, not on what it is.
+	return granted, renamed, renamed && exact == ""
+}
+
+// nickLookalikeNotice is what somebody whose name renders like a name
+// already in use is told.
+//
+// It does not name the other person. Two people cannot both be sam here
+// and the second one does not need to be told who the first is — it
+// would hand somebody who was imitating a name confirmation that the
+// target exists, and tell somebody who was not about a stranger.
+func nickLookalikeNotice(want, granted string) string {
+	return fmt.Sprintf("the nick %q renders the same as one already in use here — you are %q. "+
+		"Names that look alike are separated on purpose: a mention has to reach one person, "+
+		"and somebody reading the room has to be able to tell you apart.", want, granted)
+}
+
+// nickUnmentionableNotice is what somebody whose claimed name could not
+// be addressed by an @mention is told.
+//
+// It has to say WHY. The name they now carry is not the one they typed,
+// and nothing else on the hub will ever explain the difference — so the
+// notice names the mention that would have gone nowhere, which is the
+// only part of this that cost them anything.
+func nickUnmentionableNotice(want, granted string) string {
+	const rule = "a mention ends at the first space and drops punctuation from the ends"
+	if toks := mentionTokens("@" + want); len(toks) == 1 {
+		return fmt.Sprintf("@mentions cannot address the nick %q — you are %q here. "+
+			"Because %s, %q would have named %q and reached nobody.",
+			want, granted, rule, "@"+want, toks[0])
+	}
+	// No token at all: an "@" inside the name makes it an address.
+	return fmt.Sprintf("@mentions cannot address the nick %q — you are %q here. "+
+		"%q is read as an email address, not a mention, so naming you would have reached nobody.",
+		want, granted, "@"+want)
+}
+
+// nickUnusableNotice is for the name with nothing addressable left in
+// it at all — "..." trims away to nothing. Said out loud because the
+// alternative is a peer with no name and no account of why.
+func nickUnusableNotice(want string) string {
+	return fmt.Sprintf("the nick %q cannot be used here — nothing is left of it that an @mention could "+
+		"address, so you are known by your identity hash. Reconnect with another name to be mentionable.", want)
 }
 
 // nickTakenNotice is what a renamed peer is told.

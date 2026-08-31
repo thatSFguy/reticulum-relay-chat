@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/thatSFguy/reticulum-relay-chat/internal/rrc"
@@ -116,24 +117,115 @@ func looksLikeHashPrefix(tok string) bool {
 	return true
 }
 
-// normalizeNick validates and trims a nick. Returns ("", false) when the
-// nick is invalid (control chars, invalid UTF-8, or too long) so the
-// caller drops it.
+// normalizeText validates and trims self-asserted text — a nick, an
+// /away reason. Returns ("", false) when it is unusable (control chars,
+// invalid UTF-8, or too long) so the caller drops it.
+//
+// Interior spaces are KEPT: an away reason is a sentence.
+func normalizeText(s string, maxBytes int) (string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false
+	}
+	if !utf8.ValidString(s) {
+		return "", false
+	}
+	if strings.ContainsAny(s, "\n\r\x00") {
+		return "", false
+	}
+	if maxBytes > 0 && len(s) > maxBytes {
+		return "", false
+	}
+	return s, true
+}
+
+// normalizeNick is normalizeText plus the one rule that applies to a
+// NAME and not to prose: interior whitespace becomes "_".
+//
+// A nick is not just a label, it is what @mentions address, and
+// mentionTokens splits the body on whitespace because that is how
+// people write. So "sam jones" is a name nobody can mention:
+// "@sam jones" tokenizes to "sam", which names a different person
+// or nobody at all — and a mention that resolves to nobody says nothing
+// about having failed, to either end. The hub already GRANTS names
+// rather than accepting them (see nicks.go), so it grants a mentionable
+// one and says why.
 func normalizeNick(nick string, maxBytes int) (string, bool) {
-	nick = strings.TrimSpace(nick)
-	if nick == "" {
+	n, ok := normalizeText(nick, maxBytes)
+	if !ok {
 		return "", false
 	}
-	if !utf8.ValidString(nick) {
+	if n = mentionableNick(n); n == "" {
 		return "", false
 	}
-	if strings.ContainsAny(nick, "\n\r\x00") {
-		return "", false
+	return n, true
+}
+
+// mentionableNick rewrites a claimed name into one an @mention can
+// actually address, or "" when nothing addressable is left.
+//
+// The rule is deliberately NOT a list of banned characters. It is a
+// fixed point: whatever the hub grants, mentionTokens("@"+nick) must
+// hand back that same nick. mentionTokens is the only authority on what
+// a mention names, it lives next door in mentions.go, and it can change
+// — so the invariant is checked here rather than assumed, and a name
+// that still fails it is dropped instead of granted.
+//
+// Three ways a name failed it, all with the same silent ending — the
+// sender believes they notified somebody, the recipient hears nothing,
+// and the hub logs neither:
+//
+//	"sam jones"  ->  "@sam jones" names "sam"
+//	"sam!"           ->  "@sam!" names "sam", punctuation trimmed off the end
+//	"bob@host"       ->  "@bob@host" is read as an address and skipped whole
+func mentionableNick(s string) string {
+	// Invisible first: a zero-width space is not whitespace to
+	// strings.Fields and not punctuation to the trimmer, so nothing
+	// below would have removed it — and a name that differs from
+	// another only invisibly is not a different name (lookalikes.go).
+	s = stripInvisible(s)
+	s = underscoreSpaces(s)
+	// A second "@" makes the token an email address to mentionTokens,
+	// which skips it entirely — the name is not merely mis-parsed, it
+	// is never a mention at all.
+	s = strings.ReplaceAll(s, "@", "_")
+	// The ends the tokenizer trims. Interior punctuation is untouched,
+	// so "O'Brien" and "sam.jones" survive intact — only the ends of a
+	// token are stripped, and only there does a name have to give way.
+	s = strings.TrimFunc(s, isTrimmedFromMention)
+	if s == "" {
+		return ""
 	}
-	if maxBytes > 0 && len(nick) > maxBytes {
-		return "", false
+	if toks := mentionTokens("@" + s); len(toks) != 1 || toks[0] != s {
+		return ""
 	}
-	return nick, true
+	return s
+}
+
+// underscoreSpaces replaces each run of whitespace with a single "_".
+//
+// Applied after the length check on purpose: it can only shrink the
+// string (a run collapses to one byte, and a multi-byte space like
+// U+00A0 becomes one), so a nick that fit still fits.
+func underscoreSpaces(s string) string {
+	if strings.IndexFunc(s, unicode.IsSpace) < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	pendingSpace := false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			pendingSpace = true
+			continue
+		}
+		if pendingSpace && b.Len() > 0 {
+			b.WriteByte('_')
+		}
+		pendingSpace = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // chunkText splits text into rune-safe NOTICE chunks of at most

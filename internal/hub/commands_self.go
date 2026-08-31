@@ -180,11 +180,11 @@ func (s *Session) cmdSeen(parts []string, room string) {
 func (s *Session) cmdAway(parts []string, room string) {
 	h := s.hub
 	reason := strings.TrimSpace(strings.Join(parts[1:], " "))
-	// Bounded and sanitised on the same terms as a nick: it is
-	// self-asserted text the hub will echo back to other people in
-	// /who and /seen.
+	// Bounded and sanitised like a nick, but through normalizeText, not
+	// normalizeNick: a reason is a sentence, and "back in 10 minutes"
+	// must not come back as "back_in_10_minutes".
 	if reason != "" {
-		if r, ok := normalizeNick(reason, h.limits.MaxNickBytes*4); ok {
+		if r, ok := normalizeText(reason, h.limits.MaxNickBytes*4); ok {
 			reason = r
 		} else {
 			s.sendNotice(roomPtr(room), "away reason rejected (too long, or not printable text)")
