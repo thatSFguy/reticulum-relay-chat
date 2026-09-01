@@ -32,10 +32,10 @@ func TestNotificationNamesTheRoom(t *testing.T) {
 	if !strings.Contains(body, "alice") || !strings.Contains(body, "the relay is down") {
 		t.Errorf("body lost the author or the text: %q", body)
 	}
-	// The way back is a link in the syntax NomadNet already uses
-	// (SPEC §11.6.3): a room name alone is not directions, because room
-	// names are not unique across hubs.
-	if !strings.Contains(body, "rrc@"+testDest+":/room/ops") {
+	// The way back is a link in the form NomadNet already reads
+	// (rrc-room-links.md v2): a room name alone is not directions,
+	// because room names are not unique across hubs.
+	if !strings.Contains(body, "rrc://"+testDest+"/ops") {
 		t.Errorf("body does not carry a link back to the room: %q", body)
 	}
 	if !strings.Contains(body, "/notify off") {

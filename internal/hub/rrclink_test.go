@@ -13,12 +13,28 @@ const testDest = "43c8adb1172377a76b8f9ba41bb85e5c"
 
 func TestLinkRendersTheNomadNetTargetSyntax(t *testing.T) {
 	got := RRCLink{DestHash: testDest, Room: "ops"}.String()
-	want := "rrc@" + testDest + ":/room/ops"
+	want := "rrc://" + testDest + "/ops"
 	if got != want {
 		t.Errorf("link = %q, want %q", got, want)
 	}
-	if hub := (RRCLink{DestHash: testDest}).String(); hub != "rrc@"+testDest {
-		t.Errorf("hub link = %q, want %q", hub, "rrc@"+testDest)
+	if hub := (RRCLink{DestHash: testDest}).String(); hub != "rrc://"+testDest {
+		t.Errorf("hub link = %q, want %q", hub, "rrc://"+testDest)
+	}
+	// The default aspect is never spelled out; another one always is.
+	if l := (RRCLink{DestHash: testDest, Room: "ops", DestName: rrcLinkAspect}).String(); l != want {
+		t.Errorf("default dest_name leaked into the link: %q", l)
+	}
+	if l := (RRCLink{DestHash: testDest, Room: "ops", DestName: "my.hub"}).String(); l != "rrc://"+testDest+":my.hub/ops" {
+		t.Errorf("dest_name link = %q", l)
+	}
+}
+
+// The room segment is literal: NomadNet does no percent-decoding, so an
+// encoded name would join a room whose name contains a literal "%20".
+func TestLinkDoesNotPercentEncodeTheRoom(t *testing.T) {
+	got := RRCLink{DestHash: testDest, Room: "a:b@c"}.String()
+	if want := "rrc://" + testDest + "/a:b@c"; got != want {
+		t.Errorf("link = %q, want %q", got, want)
 	}
 }
 
@@ -27,14 +43,25 @@ func TestParseAcceptsEveryFormSpec1163Defines(t *testing.T) {
 		in   string
 		room string
 	}{
-		// The shorthand, which is the canonical form we emit.
-		{"rrc@" + testDest + ":/room/ops", "ops"},
-		{"rrc@" + testDest, ""},
-		// The expanded aspect, as lxmf.delivery@ is accepted for lxmf@.
-		{"rrc.hub@" + testDest + ":/room/ops", "ops"},
+		// The canonical v2 form, which is what String() emits.
+		{"rrc://" + testDest + "/ops", "ops"},
+		{"rrc://" + testDest, ""},
+		// The shorthand spellings expand_shorthands routes to the same
+		// handler (Browser.py:206-214, :312-314).
+		{"rrc@" + testDest + "/ops", "ops"},
+		{"rrc.hub@" + testDest + "/ops", "ops"},
+		{"rrc.hub.session@" + testDest + "/ops", "ops"},
+		// The default aspect spelled out addresses the same hub.
+		{"rrc://" + testDest + ":rrc.hub/ops", "ops"},
+		// Browser.py:431-432 strips one leading slash before splitting.
+		{"rrc:///" + testDest + "/ops", "ops"},
+		// Upstream normalises the room: strip, lstrip("#"), lower.
+		{"rrc://" + testDest + "/#Ops", "ops"},
 		// The bare-hash form, which NomadNet also accepts.
 		{testDest, ""},
-		{testDest + ":/room/ops", "ops"},
+		// v1 links, still in the wild. Nothing writes them any more.
+		{"rrc@" + testDest + ":/room/ops", "ops"},
+		{"rrc@" + testDest + ":/room/two%20words", "two words"},
 		// §11.6.3: normalize hash hex to lower case.
 		{"RRC@" + strings.ToUpper(testDest) + ":/room/ops", "ops"},
 	}
@@ -65,10 +92,8 @@ func TestParseIsStrictAboutTheHash(t *testing.T) {
 		"rrc@zzc8adb1172377a76b8f9ba41bb85e5c",   // not hex
 		"lxmf@" + testDest,                       // a different aspect
 		"nnn@" + testDest,                        // a different aspect
-		"rrc@" + testDest + ":/page/index.mu",    // a path we do not define
-		"rrc@" + testDest + ":/room/",            // names no room
-		"rrc@" + testDest + ":/room/%",           // truncated escape
-		"rrc@" + testDest + ":/room/%zz",         // bad escape
+		"rrc@" + testDest + ":/room/%",           // truncated v1 escape
+		"rrc@" + testDest + ":/room/%zz",         // bad v1 escape
 	}
 	for _, in := range bad {
 		if got, err := ParseRRCLink(in); err == nil {
@@ -83,14 +108,12 @@ func TestParseIsStrictAboutTheHash(t *testing.T) {
 func TestLinksRoundTripAwkwardRoomNames(t *testing.T) {
 	for _, room := range []string{
 		"ops",
-		"two words",
 		"a/b",
 		"at@sign",
 		"colon:name",
 		"percent%name",
 		"café",
 		"日本語",
-		"tab\tinside",
 	} {
 		link := RRCLink{DestHash: testDest, Room: room}.String()
 		if strings.ContainsAny(link, " \t\n") {
@@ -148,7 +171,7 @@ func TestLinkCommandPrintsAPastableLink(t *testing.T) {
 	cmd(t, s, id, "ops", "/link")
 
 	got := allNoticeText(t, link)
-	want := "rrc@" + testDest + ":/room/ops"
+	want := "rrc://" + testDest + "/ops"
 	if !strings.Contains(got, want) {
 		t.Errorf("/link did not print %q:\n%s", want, got)
 	}
@@ -159,7 +182,7 @@ func TestLinkCommandTakesARoomArgumentAndTheSigil(t *testing.T) {
 	s, link, id := connectKeyed(t, h, 0xA1, "alice")
 	cmd(t, s, id, "", "/link #ops")
 
-	if got := allNoticeText(t, link); !strings.Contains(got, ":/room/ops") {
+	if got := allNoticeText(t, link); !strings.Contains(got, "/ops") {
 		t.Errorf("/link #ops did not resolve to ops:\n%s", got)
 	}
 }
@@ -170,10 +193,10 @@ func TestLinkWithNoRoomGivesTheHub(t *testing.T) {
 	cmd(t, s, id, "", "/link")
 
 	got := allNoticeText(t, link)
-	if !strings.Contains(got, "rrc@"+testDest) {
+	if !strings.Contains(got, "rrc://"+testDest) {
 		t.Errorf("/link outside a room did not give the hub link:\n%s", got)
 	}
-	if strings.Contains(got, ":/room/") {
+	if strings.Contains(got, "rrc://"+testDest+"/") {
 		t.Errorf("/link outside a room invented a room:\n%s", got)
 	}
 }
@@ -186,7 +209,7 @@ func TestNoLinkIsEmittedWhenTheHubDoesNotKnowItsAddress(t *testing.T) {
 	cmd(t, s, id, "", "/link")
 
 	got := allNoticeText(t, link)
-	if strings.Contains(got, "rrc@") {
+	if strings.Contains(got, "rrc://") {
 		t.Errorf("a hub with no destination hash emitted a link anyway:\n%s", got)
 	}
 	if !strings.Contains(got, "does not know its own address") {

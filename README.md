@@ -172,13 +172,13 @@ not unique across them, and nothing said out loud carries which hub was
 meant. So a room has a written form:
 
 ```
-rrc@43c8adb1172377a76b8f9ba41bb85e5c:/room/ops
+rrc://43c8adb1172377a76b8f9ba41bb85e5c/ops
 ```
 
-That is not an invention. It is the link-target syntax NomadNet already
-uses (`SPEC §11.6.3`), with `rrc` as the aspect shorthand for `rrc.hub`,
-exactly as `nnn` is shorthand for `nomadnetwork.node` and `lxmf` for
-`lxmf.delivery`. Offline notifications carry one per room named — that
+That is not an invention. It is the form NomadNet already reads: its
+RRC client parses it in `Browser.handle_rrc_link`, reached from the
+`rrc://` scheme or from an `rrc@` link whose shorthand expands to
+`rrc.hub.session`. Offline notifications carry one per room named — that
 message is read outside RRC entirely, which is the case the format
 exists for — and `/link [room]` prints one on demand for handing a room
 to somebody who is not here.
