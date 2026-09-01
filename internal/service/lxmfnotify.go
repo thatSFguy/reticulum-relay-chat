@@ -563,5 +563,5 @@ func snippetOf(title, content []byte) string {
 // hubLinkForInvite renders the hub's own room link, or its bare
 // destination hash when the link format cannot be built.
 func (s *Service) hubLinkForInvite() string {
-	return "rrc@" + hex.EncodeToString(s.destHash)
+	return "rrc://" + hex.EncodeToString(s.destHash)
 }
