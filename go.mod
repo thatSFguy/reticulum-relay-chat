@@ -5,7 +5,7 @@ go 1.26.1
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/fxamacker/cbor/v2 v2.7.0
-	github.com/thatSFguy/reticulum-go v0.7.0
+	github.com/thatSFguy/reticulum-go v0.7.2
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
 
